@@ -37,6 +37,10 @@ function LineIcon({type, color = '#41516C', size = 22}) {
   return <Text style={{color, fontSize: size, fontWeight: '400'}}>{type}</Text>;
 }
 
+function AddLeadNavIcon({color = '#707797'}) {
+  return <View style={[styles.addLeadNavCircle, {borderColor: color}]}><View style={[styles.addLeadNavLine, {backgroundColor: color}]} /><View style={[styles.addLeadNavLine, styles.addLeadNavLineVertical, {backgroundColor: color}]} /></View>;
+}
+
 function PeopleIcon({color, grouped = false}) {
   return (
     <View style={styles.peopleIcon}>
@@ -98,7 +102,7 @@ function HomeScreen() {
   const visibleLeads = useMemo(() => LEADS.filter(lead => `${lead.name} ${lead.owner} ${lead.person}`.toLowerCase().includes(query.toLowerCase())), [query]);
 
   if (activeScreen === 'leads') {
-    return <LeadsScreen onHome={() => setActiveScreen('home')} />;
+    return <LeadsScreen onHome={() => setActiveScreen('home')} onAddLead={() => setActiveScreen('add-lead')} />;
   }
 
   if (activeScreen === 'add-lead') {
@@ -143,8 +147,7 @@ function HomeScreen() {
       <View style={styles.bottomBar}>
         <Pressable style={styles.navItem}><LineIcon type="home" color="#4E2CF4" /><Text style={[styles.navLabel, styles.navActive]}>Home</Text></Pressable>
         <Pressable onPress={() => setActiveScreen('leads')} style={styles.navItem}><LineIcon type="person" color="#707797" /><Text style={styles.navLabel}>Leads</Text></Pressable>
-        <Pressable onPress={() => setActiveScreen('add-lead')} style={styles.fab}><Text style={styles.fabText}>＋</Text></Pressable>
-        <Pressable style={styles.navItem}><View style={styles.activityIcon}><View style={styles.activityBar} /><View style={styles.activityBar} /><View style={styles.activityBar} /></View><Text style={styles.navLabel}>Activity</Text></Pressable>
+        <Pressable onPress={() => setActiveScreen('add-lead')} style={styles.navItem}><AddLeadNavIcon /><Text style={styles.navLabel}>Add Lead</Text></Pressable>
         <Pressable style={styles.navItem}><LineIcon type="person" color="#707797" /><Text style={styles.navLabel}>Profile</Text></Pressable>
       </View>
     </SafeAreaView>
@@ -158,7 +161,7 @@ const styles = StyleSheet.create({
   brand: {color: '#FFFFFF', fontSize: 17, fontWeight: '400', letterSpacing: -0.4}, brandAccent: {color: '#654CFF'},
   greeting: {color: '#FFFFFF', fontSize: 14, fontWeight: '400', lineHeight: 19, marginTop: 20}, subtitle: {color: '#D4D8E8', fontSize: 9, lineHeight: 14, marginTop: 2},
   scrollContent: {paddingHorizontal: 5, paddingBottom: 70},
-  overviewBackdrop: {marginHorizontal: -5, marginTop: -4, paddingHorizontal: 8, paddingTop: 20, position: 'relative'},
+  overviewBackdrop: {marginHorizontal: -5, marginTop: -4, paddingHorizontal: 20, paddingTop: 20, position: 'relative'},
   overviewCornerBackdrop: {position: 'absolute', top: 0, left: 0, right: 0, height: 88, backgroundColor: '#07113D', borderBottomLeftRadius: 7, borderBottomRightRadius: 7},
   overview: {backgroundColor: '#FFFFFF', borderRadius: 12, paddingHorizontal: 9, paddingTop: 11, paddingBottom: 8, overflow: 'hidden', shadowColor: '#12204F', shadowOpacity: 0.1, shadowRadius: 8, elevation: 3},
   sectionHeading: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 1}, sectionTitle: {color: '#11183C', fontSize: 11, fontWeight: '400'}, date: {color: '#5C6380', fontSize: 8.5, fontWeight: '400'},
@@ -175,14 +178,14 @@ const styles = StyleSheet.create({
   myLeadsHeading: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginHorizontal: 15, marginTop: 19, marginBottom: 11}, myLeads: {color: '#0D1438', fontSize: 15, fontWeight: '400'}, viewAll: {color: '#4D32F4', fontSize: 12, fontWeight: '400'},
   searchRow: {flexDirection: 'row', gap: 9, marginHorizontal: 15}, searchBox: {flex: 1, height: 41, borderWidth: 1.3, borderColor: '#5E67FF', borderRadius: 8, backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center'}, searchIcon: {fontSize: 21, color: '#334078', marginLeft: 10, transform: [{rotate: '-20deg'}]}, searchInput: {flex: 1, color: '#10183D', fontSize: 13, paddingHorizontal: 9, paddingVertical: 0},
   filterButton: {width: 43, height: 41, borderWidth: 1, borderColor: '#D9DCE8', borderRadius: 8, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center'}, filterImage: {width: 32, height: 32},
-  filters: {gap: 5, paddingHorizontal: 3, paddingVertical: 7}, filterPill: {height: 20, borderRadius: 10, backgroundColor: '#F0F2F7', justifyContent: 'center', paddingHorizontal: 8}, filterPillActive: {backgroundColor: '#10194C'}, followupFilter: {backgroundColor: '#FFF0EC'}, filterText: {color: '#333B60', fontSize: 8, fontWeight: '400'}, filterTextActive: {color: '#FFFFFF'},
-  leadsList: {gap: 10, marginHorizontal: 2, paddingVertical: 2}, leadCard: {minHeight: 125, backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: '#E2E6F0', flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 16, shadowColor: '#29345C', shadowOffset: {width: 0, height: 3}, shadowOpacity: 0.1, shadowRadius: 7, elevation: 4},
+  filters: {gap: 7, paddingHorizontal: 15, paddingTop: 14, paddingBottom: 12}, filterPill: {height: 22, borderRadius: 11, backgroundColor: '#F0F2F7', justifyContent: 'center', paddingHorizontal: 9}, filterPillActive: {backgroundColor: '#10194C'}, followupFilter: {backgroundColor: '#FFF0EC'}, filterText: {color: '#333B60', fontSize: 10, fontWeight: '400'}, filterTextActive: {color: '#FFFFFF'},
+  leadsList: {gap: 10, marginHorizontal: 15, paddingVertical: 2}, leadCard: {minHeight: 125, backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: '#E2E6F0', flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 16},
   shopIcon: {width: 38, height: 38, borderRadius: 9, alignItems: 'center', paddingTop: 8}, awning: {width: 22, height: 5, borderTopLeftRadius: 3, borderTopRightRadius: 3}, shopBody: {width: 20, height: 16, borderWidth: 1.5, alignItems: 'center', justifyContent: 'flex-end'}, shopDoor: {width: 5, height: 9},
   leadDetails: {flex: 1, marginLeft: 10}, leadName: {color: '#11183A', fontSize: 14.5, fontWeight: '400'}, leadLocation: {color: '#626986', fontSize: 11, marginTop: 3}, contactRow: {flexDirection: 'row', alignItems: 'center', marginTop: 6}, contactName: {color: '#454D6C', fontSize: 11, fontWeight: '400'}, dot: {color: '#9AA0B5', fontSize: 10, marginHorizontal: 4}, contactPhone: {color: '#1D285C', fontSize: 11, fontWeight: '400'}, nextFollowup: {flexDirection: 'row', alignItems: 'center', marginTop: 7}, calendar: {color: '#5C43F3', fontSize: 11, marginRight: 5}, followupText: {color: '#616986', fontSize: 11}, followupDue: {color: '#FF4D34'},
   leadRight: {alignItems: 'flex-end', justifyContent: 'space-between'}, statusPill: {height: 21, borderRadius: 5, paddingHorizontal: 8, justifyContent: 'center'}, statusText: {fontSize: 10.5, fontWeight: '400'}, chevron: {color: '#18245C', fontSize: 23, lineHeight: 23},
   bottomBar: {height: 57, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#E8EAF1', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: 4}, navItem: {width: 50, alignItems: 'center', justifyContent: 'center'}, navLabel: {color: '#707797', fontSize: 8.5, marginTop: 2, fontWeight: '400'}, navActive: {color: '#4935F4'},
+  addLeadNavCircle: {width: 20, height: 20, borderRadius: 10, borderWidth: 1.7, alignItems: 'center', justifyContent: 'center'}, addLeadNavLine: {position: 'absolute', width: 10, height: 1.7, borderRadius: 1}, addLeadNavLineVertical: {transform: [{rotate: '90deg'}]},
   homeIcon: {position: 'relative', alignItems: 'center', justifyContent: 'flex-end'}, homeRoof: {position: 'absolute', top: 2, width: 16, height: 16, borderRadius: 2, transform: [{rotate: '45deg'}]}, homeBody: {width: 18, height: 14, borderBottomLeftRadius: 2, borderBottomRightRadius: 2, alignItems: 'center', justifyContent: 'flex-end'}, homeDoor: {width: 5, height: 8, backgroundColor: '#FFFFFF', borderTopLeftRadius: 1, borderTopRightRadius: 1}, personHead: {width: 9, height: 9, borderRadius: 5}, personBody: {width: 18, height: 10, borderTopLeftRadius: 10, borderTopRightRadius: 10, borderBottomLeftRadius: 3, borderBottomRightRadius: 3, marginTop: 2},
-  fab: {width: 40, height: 40, borderRadius: 20, backgroundColor: '#4E32F4', marginTop: -20, alignItems: 'center', justifyContent: 'center', shadowColor: '#4E32F4', shadowOpacity: 0.35, shadowRadius: 5, elevation: 6}, fabText: {color: '#FFFFFF', fontSize: 25, fontWeight: '400', marginTop: -2}, activityIcon: {height: 20, flexDirection: 'row', alignItems: 'center', gap: 2}, activityBar: {width: 5, height: 18, borderRadius: 2, backgroundColor: '#41516C'},
 });
 
 export default HomeScreen;

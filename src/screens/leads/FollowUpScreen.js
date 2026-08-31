@@ -37,7 +37,6 @@ function FollowUpScreen({lead, onBack}) {
       <View style={styles.header}>
         <Pressable accessibilityLabel="Back to lead details" hitSlop={12} onPress={onBack} style={styles.backButton}><BackArrow /></Pressable>
         <View style={styles.headerText}><Text style={styles.title}>Follow-up</Text><Text style={styles.salon}>{lead.name}</Text></View>
-        <Pressable style={styles.saveButton}><Text style={styles.saveText}>Save</Text></Pressable>
       </View>
 
       <View style={styles.card}>
@@ -88,7 +87,7 @@ const styles = StyleSheet.create({
   screen: {flex: 1, backgroundColor: '#F7F8FC'},
   header: {height: 80, backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, borderBottomWidth: 1, borderBottomColor: '#EEF0F5'},
   backButton: {width: 35, height: 40, justifyContent: 'center'}, backArrow: {width: 20, height: 17, justifyContent: 'center'}, arrowLine: {width: 19, height: 2.2, borderRadius: 2, backgroundColor: '#10183D'}, arrowTop: {position: 'absolute', left: 0, top: 3, width: 10, height: 2.2, borderRadius: 2, backgroundColor: '#10183D', transform: [{rotate: '-45deg'}]}, arrowBottom: {position: 'absolute', left: 0, bottom: 3, width: 10, height: 2.2, borderRadius: 2, backgroundColor: '#10183D', transform: [{rotate: '45deg'}]},
-  headerText: {flex: 1}, title: {color: '#11183C', fontSize: 20, fontWeight: '400'}, salon: {color: '#263052', fontSize: 13, fontWeight: '400', marginTop: 4}, saveButton: {height: 35, justifyContent: 'center', paddingHorizontal: 9}, saveText: {color: '#4D32F4', fontSize: 16, fontWeight: '400'},
+  headerText: {flex: 1}, title: {color: '#11183C', fontSize: 20, fontWeight: '400'}, salon: {color: '#263052', fontSize: 13, fontWeight: '400', marginTop: 4},
   card: {flex: 1, marginTop: 8, backgroundColor: '#FFFFFF', borderTopLeftRadius: 15, borderTopRightRadius: 15, borderWidth: 1, borderBottomWidth: 0, borderColor: '#E6E8F0', paddingHorizontal: 18, paddingTop: 14},
   cardTitle: {color: '#11183C', fontSize: 16, fontWeight: '400'}, fieldsRow: {flexDirection: 'row', gap: 14, marginTop: 19, zIndex: 10}, dateColumn: {flex: 1.28, position: 'relative'}, timeColumn: {flex: 1, position: 'relative'}, openColumn: {zIndex: 20}, label: {color: '#171F43', fontSize: 13, fontWeight: '400', marginBottom: 7}, required: {color: '#F13F4E'},
   field: {height: 43, borderWidth: 1, borderColor: '#A4AEFF', borderRadius: 9, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 11, backgroundColor: '#FFFFFF'}, calendarIcon: {width: 18, height: 18, marginRight: 9, tintColor: '#344599'}, fieldText: {flex: 1, color: '#11183C', fontSize: 13, fontWeight: '400'},
