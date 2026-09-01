@@ -13,6 +13,8 @@ import {
   View,
 } from 'react-native';
 
+import {authService} from '../../services/apiService';
+
 // A versioned asset name prevents Android/Metro from reusing the stale
 // fallback-only image entry after the artwork was updated.
 const heroArtwork = require('../../assets/images/relative/login-hero-v2.png');
@@ -20,23 +22,35 @@ const heroArtwork = require('../../assets/images/relative/login-hero-v2.png');
 function LoginScreen({onSendOtp}) {
   const [mobileNumber, setMobileNumber] = useState('');
   const [isMobileTouched, setIsMobileTouched] = useState(false);
+  const [apiError, setApiError] = useState('');
+  const [isSendingOtp, setIsSendingOtp] = useState(false);
   const {height} = useWindowDimensions();
   const heroHeight = Math.min(Math.max(height * 0.5, 355), 420);
   const isMobileValid = mobileNumber.length === 10;
   const showMobileError = isMobileTouched && !isMobileValid;
 
-  const handleSendOtp = () => {
+  const handleSendOtp = async () => {
     setIsMobileTouched(true);
+    setApiError('');
 
-    if (!isMobileValid) {
+    if (!isMobileValid || isSendingOtp) {
       return;
     }
 
-    onSendOtp?.(mobileNumber);
+    try {
+      setIsSendingOtp(true);
+      await authService.sendOtp(mobileNumber);
+      onSendOtp?.(mobileNumber);
+    } catch (error) {
+      setApiError(error.message || 'Unable to send OTP. Please try again.');
+    } finally {
+      setIsSendingOtp(false);
+    }
   };
 
   const handleMobileChange = value => {
     setMobileNumber(value.replace(/\D/g, '').slice(0, 10));
+    setApiError('');
   };
 
   return (
@@ -103,19 +117,22 @@ function LoginScreen({onSendOtp}) {
               )}
             </View>
 
-            {showMobileError && (
+            {(showMobileError || apiError) && (
               <View style={styles.errorMessage}>
                 <View style={styles.errorIcon}>
                   <Text style={styles.errorIconText}>!</Text>
                 </View>
                 <Text style={styles.errorText}>
-                  Please enter a valid 10-digit mobile number.
+                  {showMobileError
+                    ? 'Please enter a valid 10-digit mobile number.'
+                    : apiError}
                 </Text>
               </View>
             )}
 
             <Pressable
               accessibilityRole="button"
+              disabled={isSendingOtp}
               onPress={handleSendOtp}
               style={({pressed}) => [
                 styles.otpButton,
