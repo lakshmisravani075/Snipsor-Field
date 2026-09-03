@@ -1,10 +1,12 @@
-import React, {useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {
   ImageBackground,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -20,14 +22,31 @@ import {authService} from '../../services/apiService';
 const heroArtwork = require('../../assets/images/relative/login-hero-v2.png');
 
 function LoginScreen({onSendOtp}) {
+  const formScrollRef = useRef(null);
   const [mobileNumber, setMobileNumber] = useState('');
   const [isMobileTouched, setIsMobileTouched] = useState(false);
   const [apiError, setApiError] = useState('');
   const [isSendingOtp, setIsSendingOtp] = useState(false);
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
   const {height} = useWindowDimensions();
   const heroHeight = Math.min(Math.max(height * 0.5, 355), 420);
   const isMobileValid = mobileNumber.length === 10;
   const showMobileError = isMobileTouched && !isMobileValid;
+
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener('keyboardDidShow', () => {
+      setIsKeyboardVisible(true);
+      setTimeout(() => formScrollRef.current?.scrollToEnd({animated: true}), 80);
+    });
+    const hideSubscription = Keyboard.addListener('keyboardDidHide', () => {
+      setIsKeyboardVisible(false);
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
 
   const handleSendOtp = async () => {
     setIsMobileTouched(true);
@@ -51,6 +70,7 @@ function LoginScreen({onSendOtp}) {
   const handleMobileChange = value => {
     setMobileNumber(value.replace(/\D/g, '').slice(0, 10));
     setApiError('');
+    setTimeout(() => formScrollRef.current?.scrollToEnd({animated: false}), 40);
   };
 
   return (
@@ -72,11 +92,21 @@ function LoginScreen({onSendOtp}) {
 
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.formSheet}>
+          style={[
+            styles.formSheet,
+            isKeyboardVisible && styles.formSheetKeyboardVisible,
+          ]}>
           <View style={styles.sheetSurface}>
             <View style={styles.dragHandle} />
 
-            <View style={styles.formContent}>
+            <ScrollView
+              ref={formScrollRef}
+              contentContainerStyle={[
+                styles.formContent,
+                isKeyboardVisible && styles.formContentKeyboardVisible,
+              ]}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}>
             <Text style={styles.title}>Login with Mobile Number</Text>
             <Text style={styles.description}>
               We'll send you a 6-digit OTP to verify your number.
@@ -143,7 +173,7 @@ function LoginScreen({onSendOtp}) {
               <Text style={styles.buttonText}>Send OTP</Text>
               <Text style={styles.arrow}>→</Text>
             </Pressable>
-            </View>
+            </ScrollView>
           </View>
         </KeyboardAvoidingView>
       </View>
@@ -168,6 +198,7 @@ const styles = StyleSheet.create({
     flex: 1,
     marginTop: -22,
   },
+  formSheetKeyboardVisible: {marginTop: -104},
   sheetSurface: {
     flex: 1,
     backgroundColor: '#FFFFFF',
@@ -183,7 +214,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#C9C5EC',
     marginTop: 11,
   },
-  formContent: {paddingHorizontal: 39, paddingTop: 44},
+  formContent: {paddingHorizontal: 39, paddingTop: 44, paddingBottom: 18},
+  formContentKeyboardVisible: {paddingBottom: 70},
   title: {color: '#0A1237', fontSize: 20, fontWeight: '400'},
   description: {color: '#686E8F', fontSize: 13, marginTop: 10},
   phoneField: {

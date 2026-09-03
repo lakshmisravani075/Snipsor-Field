@@ -6,8 +6,10 @@ import OtpScreen from './src/screens/login/OtpScreen.js';
 import HomeScreen from './src/screens/home/HomeScreen.js';
 import SplashScreen from './src/screens/login/SplashScreen.js';
 import OnboardingTasksScreen from './src/screens/onboarding/screens/OnboardingTasksScreen.js';
+import ActivationScreen from './src/screens/activation/ActivationScreen.js';
 
 const ONBOARDING_USER_MOBILE = '9000000002';
+const ACTIVATION_USER_MOBILE = '9000000003';
 
 function App() {
   const isTestEnvironment = process.env.NODE_ENV === 'test';
@@ -15,6 +17,7 @@ function App() {
   const [mobileNumber, setMobileNumber] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [showActivation, setShowActivation] = useState(false);
 
   useEffect(() => {
     if (isTestEnvironment) {
@@ -28,6 +31,8 @@ function App() {
     <SafeAreaProvider>
       {isSplashVisible ? (
         <SplashScreen />
+      ) : showActivation ? (
+        <ActivationScreen />
       ) : showOnboarding ? (
         <OnboardingTasksScreen />
       ) : isAuthenticated ? (
@@ -37,6 +42,10 @@ function App() {
           mobileNumber={mobileNumber}
           onBack={() => setMobileNumber(null)}
           onVerified={() => {
+            if (mobileNumber === ACTIVATION_USER_MOBILE) {
+              setShowActivation(true);
+              return;
+            }
             if (mobileNumber === ONBOARDING_USER_MOBILE) {
               setShowOnboarding(true);
               return;

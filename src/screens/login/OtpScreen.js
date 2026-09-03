@@ -7,6 +7,7 @@ import {
   Platform,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -29,7 +30,9 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
   const [activeIndex, setActiveIndex] = useState(null);
   const [secondsLeft, setSecondsLeft] = useState(RESEND_SECONDS);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
   const inputRef = useRef(null);
+  const formScrollRef = useRef(null);
   const {height} = useWindowDimensions();
   const heroHeight = Math.min(Math.max(height * 0.43, 300), 365);
   const otp = otpDigits.join('');
@@ -42,6 +45,21 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
     const timer = setTimeout(() => setSecondsLeft(value => value - 1), 1000);
     return () => clearTimeout(timer);
   }, [secondsLeft]);
+
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener('keyboardDidShow', () => {
+      setIsKeyboardVisible(true);
+      setTimeout(() => formScrollRef.current?.scrollToEnd({animated: true}), 80);
+    });
+    const hideSubscription = Keyboard.addListener('keyboardDidHide', () => {
+      setIsKeyboardVisible(false);
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
 
   const handleOtpChange = value => {
     const digit = value.replace(/\D/g, '').slice(-1);
@@ -57,11 +75,13 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
     });
     setOtpStatus(null);
     setActiveIndex(index => Math.min(index + 1, OTP_LENGTH - 1));
+    setTimeout(() => formScrollRef.current?.scrollToEnd({animated: false}), 40);
   };
 
   const handleOtpBoxPress = index => {
     setActiveIndex(index);
-    requestAnimationFrame(() => inputRef.current?.focus());
+    inputRef.current?.blur();
+    setTimeout(() => inputRef.current?.focus(), 40);
   };
 
   const handleOtpKeyPress = ({nativeEvent}) => {
@@ -138,11 +158,21 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
 
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.formSheet}>
+          style={[
+            styles.formSheet,
+            isKeyboardVisible && styles.formSheetKeyboardVisible,
+          ]}>
           <View style={styles.sheetSurface}>
             <View style={styles.dragHandle} />
 
-            <View style={styles.formContent}>
+            <ScrollView
+              ref={formScrollRef}
+              contentContainerStyle={[
+                styles.formContent,
+                isKeyboardVisible && styles.formContentKeyboardVisible,
+              ]}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}>
               <Pressable
                 accessibilityLabel="Go back"
                 accessibilityRole="button"
@@ -193,11 +223,13 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
                 ))}
                 <TextInput
                   ref={inputRef}
+                  autoFocus
                   caretHidden
                   keyboardType="number-pad"
                   maxLength={1}
                   onChangeText={handleOtpChange}
                   onKeyPress={handleOtpKeyPress}
+                  showSoftInputOnFocus
                   style={styles.hiddenInput}
                   value=""
                 />
@@ -238,7 +270,7 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
                 </Text>
                 <Text style={styles.arrow}>→</Text>
               </Pressable>
-            </View>
+            </ScrollView>
           </View>
         </KeyboardAvoidingView>
       </View>
@@ -260,6 +292,7 @@ const styles = StyleSheet.create({
   brandAccent: {color: '#4D32FF'},
   tagline: {color: '#C6CAE0', fontSize: 11, marginTop: 4},
   formSheet: {flex: 1, marginTop: -20},
+  formSheetKeyboardVisible: {marginTop: -84},
   sheetSurface: {
     flex: 1,
     backgroundColor: '#FFFFFF',
@@ -275,7 +308,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#C9C5EC',
     marginTop: 11,
   },
-  formContent: {paddingHorizontal: 16, paddingTop: 17},
+  formContent: {paddingHorizontal: 16, paddingTop: 17, paddingBottom: 18},
+  formContentKeyboardVisible: {paddingBottom: 70},
   backButton: {width: 28, height: 26, justifyContent: 'center'},
   backArrow: {width: 24, height: 18, justifyContent: 'center'},
   backArrowLine: {

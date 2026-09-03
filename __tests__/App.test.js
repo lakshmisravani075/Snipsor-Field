@@ -11,6 +11,20 @@ jest.mock('react-native-image-picker', () => ({
   launchImageLibrary: jest.fn(),
 }));
 
+jest.mock('react-native-vision-camera', () => {
+  const ReactForMock = require('react');
+  const {View} = require('react-native');
+  return {
+    Camera: props => ReactForMock.createElement(View, props),
+    useCameraDevice: () => ({id: 'back-camera'}),
+    useCameraPermission: () => ({
+      hasPermission: false,
+      requestPermission: jest.fn(() => Promise.resolve(false)),
+    }),
+    useCodeScanner: options => options,
+  };
+});
+
 import App from '../App';
 
 test('renders correctly', async () => {
