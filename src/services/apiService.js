@@ -11,14 +11,60 @@ class ApiError extends Error {
   }
 }
 
-let authToken = null;
+const getErrorMessage = (data, status) => {
+  if (typeof data?.message === 'string') {
+    return data.message;
+  }
+  if (Array.isArray(data?.message)) {
+    return data.message.join('\n');
+  }
+  if (Array.isArray(data?.errors)) {
+    const validationMessages = data.errors
+      .map(error => error?.message)
+      .filter(Boolean);
+    if (validationMessages.length > 0) {
+      return validationMessages.join('\n');
+    }
+  }
+  return `Request failed with status ${status}`;
+};
+
+const AUTH_TOKEN_CACHE_KEY = '__SNIPSOR_FIELD_AUTH_TOKEN__';
+let authToken = global[AUTH_TOKEN_CACHE_KEY] || null;
 
 const setAuthToken = token => {
-  authToken = token;
+  const normalizedToken = typeof token === 'string'
+    ? token.replace(/^Bearer\s+/i, '').trim()
+    : '';
+  authToken = normalizedToken || null;
+  global[AUTH_TOKEN_CACHE_KEY] = authToken;
 };
 
 const clearAuthToken = () => {
   authToken = null;
+  delete global[AUTH_TOKEN_CACHE_KEY];
+};
+
+const extractAccessToken = response => {
+  const tokenKeys = new Set(['accessToken', 'access_token', 'token', 'idToken', 'id_token', 'jwt']);
+  const pending = [{value: response, depth: 0}];
+  const visited = new Set();
+  while (pending.length > 0) {
+    const {value, depth} = pending.shift();
+    if (!value || typeof value !== 'object' || visited.has(value) || depth > 4) {
+      continue;
+    }
+    visited.add(value);
+    for (const [key, nestedValue] of Object.entries(value)) {
+      if (tokenKeys.has(key) && typeof nestedValue === 'string' && nestedValue.trim()) {
+        return nestedValue;
+      }
+      if (nestedValue && typeof nestedValue === 'object') {
+        pending.push({value: nestedValue, depth: depth + 1});
+      }
+    }
+  }
+  return null;
 };
 
 const request = async (endpoint, options = {}) => {
@@ -45,8 +91,11 @@ const request = async (endpoint, options = {}) => {
       : await response.text();
 
     if (!response.ok) {
+      if (response.status === 401) {
+        clearAuthToken();
+      }
       throw new ApiError(
-        data?.message || `Request failed with status ${response.status}`,
+        getErrorMessage(data, response.status),
         response.status,
         data,
       );
@@ -96,12 +145,31 @@ const authService = {
     apiService.post('/auth/send-otp', {
       phone_number: phoneNumber,
     }),
-  login: (phoneNumber, otp) =>
-    apiService.post('/auth/field/login', {
+  login: async (phoneNumber, otp) => {
+    const response = await apiService.post('/auth/field/login', {
       phone_number: phoneNumber,
       otp,
-    }),
+    });
+    const accessToken = extractAccessToken(response);
+    if (!accessToken) {
+      throw new ApiError('Login succeeded but no access token was returned.', 401, response);
+    }
+    setAuthToken(accessToken);
+    return response;
+  },
 };
 
-export {ApiError, authService, clearAuthToken, setAuthToken};
+const leadService = {
+  getLeads: () => apiService.get('/field/leads'),
+  getLeadDetails: leadId => apiService.get(`/field/leads/${encodeURIComponent(leadId)}`),
+  getAcquisitionTimeline: leadId =>
+    apiService.get(`/field/leads/${encodeURIComponent(leadId)}/acquisition/timeline`, {
+      headers: {'Cache-Control': 'no-cache', Pragma: 'no-cache'},
+    }),
+  createLead: lead => apiService.post('/field/leads', lead),
+  updateAcquisitionStatus: (leadId, status) =>
+    apiService.patch(`/field/leads/${encodeURIComponent(leadId)}/acquisition/status`, status),
+};
+
+export {ApiError, authService, clearAuthToken, leadService, setAuthToken};
 export default apiService;

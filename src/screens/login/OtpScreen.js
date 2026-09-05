@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 
-import {authService, setAuthToken} from '../../services/apiService';
+import {authService} from '../../services/apiService';
 
 const heroArtwork = require('../../assets/images/relative/login-hero.png');
 const OTP_LENGTH = 6;
@@ -109,11 +109,6 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
     try {
       setIsVerifying(true);
       const response = await authService.login(mobileNumber, otp);
-      const accessToken = response?.data?.accessToken;
-
-      if (accessToken) {
-        setAuthToken(accessToken);
-      }
       setOtpStatus('success');
       Keyboard.dismiss();
       onVerified?.(response);
@@ -141,7 +136,7 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
 
   return (
     <SafeAreaView style={styles.screen}>
-      <StatusBar hidden />
+      <StatusBar backgroundColor="transparent" hidden translucent />
       <View style={styles.screen}>
         <ImageBackground
           source={heroArtwork}

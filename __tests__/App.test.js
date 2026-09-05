@@ -28,7 +28,9 @@ jest.mock('react-native-vision-camera', () => {
 import App from '../App';
 
 test('renders correctly', async () => {
+  let renderer;
   await ReactTestRenderer.act(() => {
-    ReactTestRenderer.create(<App />);
+    renderer = ReactTestRenderer.create(<App />);
   });
+  ReactTestRenderer.act(() => renderer.unmount());
 });

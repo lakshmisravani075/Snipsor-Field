@@ -1,8 +1,9 @@
 import React, {useMemo, useRef, useState} from 'react';
-import {Alert, FlatList, Image, Linking, Modal, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
+import {Alert, Animated, FlatList, Image, Linking, Modal, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
 import {launchImageLibrary} from 'react-native-image-picker';
 import {Camera, useCameraDevice, useCameraPermission, useCodeScanner} from 'react-native-vision-camera';
+import LogoutScreen from '../profile/LogoutScreen.js';
 
 const FILTERS = ['All', 'QR Pending', 'Training Pending', 'Ready Activation'];
 const SALONS = [
@@ -131,6 +132,7 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
   const [scanError, setScanError] = useState(null);
   const [isTorchOn, setIsTorchOn] = useState(false);
   const isProcessingRef = useRef(false);
+  const scanLinePosition = useRef(new Animated.Value(-90)).current;
   const {hasPermission, requestPermission} = useCameraPermission();
   const cameraDevice = useCameraDevice('back');
   const expectedSalonId = `SAL-${salon.id.padStart(4, '0')}`;
@@ -181,6 +183,21 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
     return () => clearTimeout(timeout);
   }, [cameraDevice, hasPermission, isScanning]);
 
+  React.useEffect(() => {
+    if (!isScanning) {
+      scanLinePosition.stopAnimation();
+      return undefined;
+    }
+    const scanAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(scanLinePosition, {toValue: 90, duration: 1600, useNativeDriver: true}),
+        Animated.timing(scanLinePosition, {toValue: -90, duration: 1600, useNativeDriver: true}),
+      ]),
+    );
+    scanAnimation.start();
+    return () => scanAnimation.stop();
+  }, [isScanning, scanLinePosition]);
+
   const handleScanAgain = () => {
     isProcessingRef.current = false;
     setScannedValue(null);
@@ -224,6 +241,7 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
         <Text style={styles.qrTitle}>Verify Salon QR</Text>
         <Text style={styles.qrSubtitle}>Scan the salon QR code to verify and map it to this salon.</Text>
         <View style={styles.scannerBox}>
+          <View collapsable={false} style={styles.scannerViewport}>
           {hasPermission && cameraDevice ? (
             <Camera
               androidPreviewViewType="texture-view"
@@ -240,16 +258,19 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
               <Text style={styles.permissionText}>Allow Camera</Text>
             </Pressable>
           )}
-          <View style={styles.scanLineOutline} />
-          <View style={[styles.scanCornerOutline, styles.scanCornerOutlineTopLeft]} />
-          <View style={[styles.scanCornerOutline, styles.scanCornerOutlineTopRight]} />
-          <View style={[styles.scanCornerOutline, styles.scanCornerOutlineBottomLeft]} />
-          <View style={[styles.scanCornerOutline, styles.scanCornerOutlineBottomRight]} />
-          <View style={styles.scanLine} />
-          <View style={[styles.scanCorner, styles.scanCornerTopLeft]} />
-          <View style={[styles.scanCorner, styles.scanCornerTopRight]} />
-          <View style={[styles.scanCorner, styles.scanCornerBottomLeft]} />
-          <View style={[styles.scanCorner, styles.scanCornerBottomRight]} />
+          <View pointerEvents="none" style={styles.scanFrame}>
+            <Animated.View style={[styles.scanLineOutline, {transform: [{translateY: scanLinePosition}]}]} />
+            <Animated.View style={[styles.scanLine, {transform: [{translateY: scanLinePosition}]}]} />
+            <View style={[styles.scanCornerOutline, styles.scanCornerOutlineTopLeft]} />
+            <View style={[styles.scanCornerOutline, styles.scanCornerOutlineTopRight]} />
+            <View style={[styles.scanCornerOutline, styles.scanCornerOutlineBottomLeft]} />
+            <View style={[styles.scanCornerOutline, styles.scanCornerOutlineBottomRight]} />
+            <View style={[styles.scanCorner, styles.scanCornerTopLeft]} />
+            <View style={[styles.scanCorner, styles.scanCornerTopRight]} />
+            <View style={[styles.scanCorner, styles.scanCornerBottomLeft]} />
+            <View style={[styles.scanCorner, styles.scanCornerBottomRight]} />
+          </View>
+          </View>
         </View>
         {errorContent && (
           <View style={styles.qrErrorCard}>
@@ -301,10 +322,12 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
           ))}
         </View>
         <View style={styles.qrActionButtons}>
-          <Pressable onPress={handleScanAgain} style={({pressed}) => [styles.scanAgainButton, pressed && styles.pressed]}>
-            <Ionicons name="refresh" size={16} color="#102A72" />
-            <Text style={styles.scanAgainText}>Scan Again</Text>
-          </Pressable>
+          {!isScanning && (
+            <Pressable onPress={handleScanAgain} style={({pressed}) => [styles.scanAgainButton, pressed && styles.pressed]}>
+              <Ionicons name="refresh" size={16} color="#102A72" />
+              <Text style={styles.scanAgainText}>Scan Again</Text>
+            </Pressable>
+          )}
           <Pressable
             accessibilityRole="button"
             onPress={handleContinue}
@@ -539,17 +562,15 @@ function TrainingScreen({salon, onBack, onCompleted}) {
   );
 }
 
-function ActivationResultScreen({salon, result, stepStatuses, onBack, onGoToSalons, onCompleteSteps}) {
+function ActivationResultScreen({salon, result, onBack, onGoToSalons}) {
   const isSuccess = result === 'success';
   const isRejected = result === 'rejected';
-  const color = isSuccess ? '#0AA554' : isRejected ? '#EF2638' : '#F28A13';
-  const icon = isSuccess ? 'checkmark' : isRejected ? 'close' : 'hourglass-outline';
-  const title = isSuccess ? 'Salon Activated Successfully!' : isRejected ? 'Salon Activation Rejected' : 'Activation Steps Pending';
+  const color = isSuccess ? '#0AA554' : '#EF2638';
+  const icon = isSuccess ? 'checkmark' : 'close';
+  const title = isSuccess ? 'Salon Activated Successfully!' : 'Salon Activation Rejected';
   const description = isSuccess
     ? 'Your salon has been activated successfully. You can now start managing your salon.'
-    : isRejected
-      ? "We're sorry, your salon activation request has been rejected."
-      : 'Your salon activation is in progress. Please complete the remaining steps to activate your salon.';
+    : "We're sorry, your salon activation request has been rejected.";
 
   return (
     <SafeAreaView style={styles.activationResultScreen}>
@@ -590,24 +611,6 @@ function ActivationResultScreen({salon, result, stepStatuses, onBack, onGoToSalo
           </View>
         )}
 
-        {!isSuccess && !isRejected && (
-          <View style={styles.activationPendingCard}>
-            <Text style={styles.activationPendingTitle}>Pending Steps</Text>
-            {[
-              ['qr-code-outline', 'QR Verification', stepStatuses.qr],
-              ['school-outline', 'Training', stepStatuses.training],
-              ['checkmark-circle-outline', 'Ready to Activate', stepStatuses.ready],
-            ].map(([itemIcon, label, isComplete]) => (
-              <View key={label} style={styles.activationPendingRow}>
-                <View style={styles.activationPendingIcon}><Ionicons name={itemIcon} size={18} color="#563BE8" /></View>
-                <Text style={styles.activationPendingLabel}>{label}</Text>
-                <View style={[styles.activationPendingBadge, isComplete && styles.activationCompletedBadge]}>
-                  <Text style={[styles.activationPendingBadgeText, isComplete && styles.activationCompletedBadgeText]}>{isComplete ? 'Completed' : 'Pending'}</Text>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
       </ScrollView>
 
       <View style={styles.activationResultActions}>
@@ -617,10 +620,10 @@ function ActivationResultScreen({salon, result, stepStatuses, onBack, onGoToSalo
           </Pressable>
         )}
         <Pressable
-          onPress={isSuccess || isRejected ? onGoToSalons : onCompleteSteps}
+          onPress={onGoToSalons}
           style={({pressed}) => [isRejected ? styles.activationResultSecondaryButton : styles.activationResultPrimaryButton, pressed && styles.pressed]}>
           <Text style={isRejected ? styles.activationResultSecondaryText : styles.activationResultPrimaryText}>
-            {isSuccess ? 'Go to Salons' : isRejected ? 'Back to Salons' : 'Complete Steps'}
+            {isSuccess ? 'Go to Salons' : 'Back to Salons'}
           </Text>
         </Pressable>
       </View>
@@ -636,11 +639,11 @@ function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCom
     if (!isActivationConfirmed) {
       return;
     }
-    onReadyCompleted?.();
     if (!qrVerified || !trainingCompleted) {
-      setActivationResult('pending');
+      onCompleteSteps?.();
       return;
     }
+    onReadyCompleted?.();
     setActivationResult(salon.activationStatus === 'Rejected' ? 'rejected' : 'success');
   };
 
@@ -649,10 +652,8 @@ function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCom
       <ActivationResultScreen
         salon={salon}
         result={activationResult}
-        stepStatuses={{qr: qrVerified, training: trainingCompleted, ready: true}}
         onBack={() => setActivationResult(null)}
         onGoToSalons={onGoToSalons}
-        onCompleteSteps={onCompleteSteps}
       />
     );
   }
@@ -902,17 +903,22 @@ function ActivationDetails({salon, onBack}) {
             <Text style={styles.progressHeading}>Activation Progress</Text>
             <Text style={styles.progressCount}>Step {currentStep} of 3</Text>
           </View>
-          {steps.map(([title, description], index) => (
-            <ProgressStep
-              key={title}
-              number={index + 1}
-              title={title}
-              description={description}
-              state={[isQrVerified, isTrainingCompleted, isReadyCompleted][index] ? 'complete' : 'pending'}
-              last={index === steps.length - 1}
-              onPress={index === 0 ? () => setShowQrVerification(true) : index === 1 ? () => setShowTraining(true) : () => setShowReadyToActivate(true)}
-            />
-          ))}
+          {steps.map(([title, description], index) => {
+            const isComplete = [isQrVerified, isTrainingCompleted, isReadyCompleted][index];
+            const isCurrent = index === currentStep - 1;
+            const openStep = index === 0 ? () => setShowQrVerification(true) : index === 1 ? () => setShowTraining(true) : () => setShowReadyToActivate(true);
+            return (
+              <ProgressStep
+                key={title}
+                number={index + 1}
+                title={title}
+                description={description}
+                state={isComplete ? 'complete' : isCurrent ? 'pending' : 'locked'}
+                last={index === steps.length - 1}
+                onPress={isComplete || isCurrent ? openStep : undefined}
+              />
+            );
+          })}
         </View>
       </ScrollView>
       <Pressable accessibilityRole="button" onPress={handleContinueActivation} style={({pressed}) => [styles.activationButton, pressed && styles.pressed]}>
@@ -934,29 +940,40 @@ function Detail({icon, text, large = false}) {
   );
 }
 
-function BottomBar() {
+function BottomBar({onSalons, onProfile, activeTab = 'salons'}) {
   return (
     <View style={styles.bottomBar}>
-      <Pressable style={styles.navItem}>
-        <Ionicons name="storefront-outline" size={23} color="#4D32F4" />
-        <Text style={[styles.navLabel, styles.navLabelActive]}>Salons</Text>
+      <Pressable onPress={onSalons} style={styles.navItem}>
+        <Ionicons name="storefront-outline" size={23} color={activeTab === 'salons' ? '#4D32F4' : '#142354'} />
+        <Text style={[styles.navLabel, activeTab === 'salons' && styles.navLabelActive]}>Salons</Text>
       </Pressable>
-      <Pressable style={styles.navItem}>
-        <Ionicons name="person-outline" size={23} color="#142354" />
-        <Text style={styles.navLabel}>Profile</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="Profile" onPress={onProfile} style={styles.navItem}>
+        <Ionicons name="person-outline" size={23} color={activeTab === 'profile' ? '#4D32F4' : '#142354'} />
+        <Text style={[styles.navLabel, activeTab === 'profile' && styles.navLabelActive]}>Profile</Text>
       </Pressable>
     </View>
   );
 }
 
-function ActivationScreen() {
+function ActivationScreen({onLogout}) {
   const [activeFilter, setActiveFilter] = useState('All');
   const [isSearchActive, setIsSearchActive] = useState(false);
   const [selectedSalon, setSelectedSalon] = useState(null);
+  const [showProfile, setShowProfile] = useState(false);
   const filteredSalons = useMemo(
     () => activeFilter === 'All' ? SALONS : SALONS.filter(salon => salon.status === activeFilter),
     [activeFilter],
   );
+
+  if (showProfile) {
+    return (
+      <LogoutScreen
+        onLogout={onLogout}
+        onBack={() => setShowProfile(false)}
+        bottomBar={<BottomBar activeTab="profile" onSalons={() => setShowProfile(false)} />}
+      />
+    );
+  }
 
   if (selectedSalon) {
     return <ActivationDetails salon={selectedSalon} onBack={() => setSelectedSalon(null)} />;
@@ -996,7 +1013,7 @@ function ActivationScreen() {
         renderItem={({item}) => <SalonCard salon={item} onPress={() => setSelectedSalon(item)} />}
         showsVerticalScrollIndicator={false}
       />
-      <BottomBar />
+      <BottomBar onProfile={() => setShowProfile(true)} />
     </SafeAreaView>
   );
 }
@@ -1214,21 +1231,23 @@ const styles = StyleSheet.create({
   qrTitle: {color: '#111936', fontFamily: 'Poppins_600SemiBold', fontSize: 17, textAlign: 'center', marginTop: 18},
   qrSubtitle: {color: '#68718D', fontFamily: 'Inter_400Regular', fontSize: 9.5, lineHeight: 14, textAlign: 'center', marginTop: 3, paddingHorizontal: 55},
   scannerBox: {height: 360, width: '100%', alignSelf: 'center', backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', marginTop: 14, overflow: 'hidden'},
-  scannerCameraPreview: {position: 'absolute', left: 48, right: 48, top: 48, bottom: 48},
+  scannerViewport: {width: 246, height: 246, position: 'relative', alignItems: 'center', justifyContent: 'center', overflow: 'hidden'},
+  scannerCameraPreview: {...StyleSheet.absoluteFillObject},
   permissionButton: {alignItems: 'center', justifyContent: 'center'},
   permissionText: {color: '#111936', fontFamily: 'Inter_500Medium', fontSize: 10, marginTop: 7},
-  scanLineOutline: {position: 'absolute', left: 84, right: 84, top: '50%', height: 4, marginTop: -1, borderRadius: 2, backgroundColor: 'rgba(17, 25, 54, 0.45)'},
-  scanLine: {position: 'absolute', left: 85, right: 85, top: '50%', height: 2, backgroundColor: '#FFFFFF', shadowColor: '#FFFFFF', shadowOpacity: 0.45, shadowRadius: 5, elevation: 3},
+  scanFrame: {position: 'absolute', top: 13, right: 13, bottom: 13, left: 13},
+  scanLineOutline: {position: 'absolute', left: 7, right: 7, top: '50%', height: 4, marginTop: -2, borderRadius: 2, backgroundColor: 'rgba(17, 25, 54, 0.45)'},
+  scanLine: {position: 'absolute', left: 8, right: 8, top: '50%', height: 2, marginTop: -1, backgroundColor: '#FFFFFF', shadowColor: '#FFFFFF', shadowOpacity: 0.45, shadowRadius: 5, elevation: 3},
   scanCornerOutline: {position: 'absolute', width: 32, height: 32, borderColor: 'rgba(17, 25, 54, 0.55)'},
-  scanCornerOutlineTopLeft: {left: 75, top: 75, borderLeftWidth: 5, borderTopWidth: 5, borderTopLeftRadius: 7},
-  scanCornerOutlineTopRight: {right: 75, top: 75, borderRightWidth: 5, borderTopWidth: 5, borderTopRightRadius: 7},
-  scanCornerOutlineBottomLeft: {left: 75, bottom: 75, borderLeftWidth: 5, borderBottomWidth: 5, borderBottomLeftRadius: 7},
-  scanCornerOutlineBottomRight: {right: 75, bottom: 75, borderRightWidth: 5, borderBottomWidth: 5, borderBottomRightRadius: 7},
+  scanCornerOutlineTopLeft: {left: 0, top: 0, borderLeftWidth: 5, borderTopWidth: 5, borderTopLeftRadius: 7},
+  scanCornerOutlineTopRight: {right: 0, top: 0, borderRightWidth: 5, borderTopWidth: 5, borderTopRightRadius: 7},
+  scanCornerOutlineBottomLeft: {left: 0, bottom: 0, borderLeftWidth: 5, borderBottomWidth: 5, borderBottomLeftRadius: 7},
+  scanCornerOutlineBottomRight: {right: 0, bottom: 0, borderRightWidth: 5, borderBottomWidth: 5, borderBottomRightRadius: 7},
   scanCorner: {position: 'absolute', width: 30, height: 30},
-  scanCornerTopLeft: {left: 76, top: 76, borderColor: '#FFFFFF', borderLeftWidth: 3, borderTopWidth: 3, borderTopLeftRadius: 6},
-  scanCornerTopRight: {right: 76, top: 76, borderColor: '#FFFFFF', borderRightWidth: 3, borderTopWidth: 3, borderTopRightRadius: 6},
-  scanCornerBottomLeft: {left: 76, bottom: 76, borderColor: '#FFFFFF', borderLeftWidth: 3, borderBottomWidth: 3, borderBottomLeftRadius: 6},
-  scanCornerBottomRight: {right: 76, bottom: 76, borderColor: '#FFFFFF', borderRightWidth: 3, borderBottomWidth: 3, borderBottomRightRadius: 6},
+  scanCornerTopLeft: {left: 1, top: 1, borderColor: '#FFFFFF', borderLeftWidth: 3, borderTopWidth: 3, borderTopLeftRadius: 6},
+  scanCornerTopRight: {right: 1, top: 1, borderColor: '#FFFFFF', borderRightWidth: 3, borderTopWidth: 3, borderTopRightRadius: 6},
+  scanCornerBottomLeft: {left: 1, bottom: 1, borderColor: '#FFFFFF', borderLeftWidth: 3, borderBottomWidth: 3, borderBottomLeftRadius: 6},
+  scanCornerBottomRight: {right: 1, bottom: 1, borderColor: '#FFFFFF', borderRightWidth: 3, borderBottomWidth: 3, borderBottomRightRadius: 6},
   qrErrorCard: {minHeight: 72, borderWidth: 1, borderColor: '#FFD2D5', borderRadius: 9, backgroundColor: '#FFF5F5', flexDirection: 'row', alignItems: 'flex-start', paddingHorizontal: 12, paddingVertical: 11, marginTop: 10},
   qrErrorIcon: {width: 27, height: 27, borderRadius: 14, backgroundColor: '#EF3E49', alignItems: 'center', justifyContent: 'center', marginTop: 1},
   qrErrorCopy: {flex: 1, marginLeft: 10},

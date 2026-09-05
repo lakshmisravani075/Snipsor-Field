@@ -1,5 +1,6 @@
 import React, {useState} from 'react';
 import {
+  Alert,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -13,6 +14,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import {leadService} from '../../services/apiService.js';
 
 const interestedIcon = require('../../assets/icons/status-interested.png');
 const notInterestedIcon = require('../../assets/icons/status-not-interested.png');
@@ -30,13 +32,56 @@ const TIME_OPTIONS = ['09:00 AM', '10:00 AM', '11:00 AM', '12:00 PM', '01:00 PM'
 
 const formatDate = date => `${date.getDate()} ${MONTHS[date.getMonth()]} ${date.getFullYear()}`;
 
-function UpdateStatusScreen({currentStatus, followup, onBack, onSave}) {
+const toIsoDate = value => {
+  const trimmedValue = String(value || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmedValue)) {
+    return trimmedValue;
+  }
+  const match = trimmedValue.match(/^(\d{1,2})\s+([a-z]{3})\s+(\d{4})$/i);
+  if (!match) {
+    return null;
+  }
+  const monthIndex = MONTHS.findIndex(month => month.toLowerCase() === match[2].toLowerCase());
+  if (monthIndex < 0) {
+    return null;
+  }
+  const date = new Date(Number(match[3]), monthIndex, Number(match[1]));
+  if (date.getFullYear() !== Number(match[3]) || date.getMonth() !== monthIndex || date.getDate() !== Number(match[1])) {
+    return null;
+  }
+  return `${match[3]}-${String(monthIndex + 1).padStart(2, '0')}-${match[1].padStart(2, '0')}`;
+};
+
+const toApiTime = value => {
+  const trimmedValue = String(value || '').trim();
+  if (/^([01]\d|2[0-3]):[0-5]\d$/.test(trimmedValue)) {
+    return trimmedValue;
+  }
+  const match = trimmedValue.match(/^(\d{1,2}):([0-5]\d)\s*(AM|PM)$/i);
+  if (!match || Number(match[1]) < 1 || Number(match[1]) > 12) {
+    return null;
+  }
+  const hour = (Number(match[1]) % 12) + (match[3].toUpperCase() === 'PM' ? 12 : 0);
+  return `${String(hour).padStart(2, '0')}:${match[2]}`;
+};
+
+const formatFollowUpTime = value => {
+  const match = String(value || '').match(/^([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$/);
+  if (!match) {
+    return value || '04:00 PM';
+  }
+  const hour = Number(match[1]);
+  return `${String(hour % 12 || 12).padStart(2, '0')}:${match[2]} ${hour >= 12 ? 'PM' : 'AM'}`;
+};
+
+function UpdateStatusScreen({leadId, currentStatus, followup, followupTime, onBack, onSave, onSessionExpired}) {
   const today = new Date();
   const [selectedStatus, setSelectedStatus] = useState(currentStatus || 'Interested');
   const [followUpDate, setFollowUpDate] = useState(followup || formatDate(today));
-  const [followUpTime, setFollowUpTime] = useState('04:00 PM');
+  const [followUpTime, setFollowUpTime] = useState(() => formatFollowUpTime(followupTime));
   const [note, setNote] = useState('');
   const [pickerMode, setPickerMode] = useState(null);
+  const [isSaving, setIsSaving] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const current = STATUS_OPTIONS.find(option => option.title === currentStatus) || STATUS_OPTIONS[0];
   const calendarMonthName = MONTHS[calendarMonth.getMonth()];
@@ -45,6 +90,43 @@ function UpdateStatusScreen({currentStatus, followup, onBack, onSave}) {
 
   const changeMonth = offset => {
     setCalendarMonth(previous => new Date(previous.getFullYear(), previous.getMonth() + offset, 1));
+  };
+
+  const updateStatus = async () => {
+    if (isSaving) {
+      return;
+    }
+    if (!leadId) {
+      Alert.alert('Unable to update status', 'The selected lead does not have a valid ID.');
+      return;
+    }
+    const payload = {
+      status: selectedStatus.toUpperCase().replace(/[ -]+/g, '_'),
+    };
+    if (selectedStatus === 'Follow-up') {
+      const apiDate = toIsoDate(followUpDate);
+      const apiTime = toApiTime(followUpTime);
+      if (!apiDate || !apiTime) {
+        Alert.alert('Invalid follow-up details', 'Select a valid follow-up date and time.');
+        return;
+      }
+      payload.follow_up_date = apiDate;
+      payload.follow_up_time = apiTime;
+      payload.follow_up_note = note.trim() || null;
+    }
+    try {
+      setIsSaving(true);
+      const response = await leadService.updateAcquisitionStatus(leadId, payload);
+      onSave?.(selectedStatus, response, payload);
+    } catch (error) {
+      if (error?.status === 401) {
+        Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onSessionExpired}]);
+        return;
+      }
+      Alert.alert('Unable to update status', error?.message || 'Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -108,8 +190,8 @@ function UpdateStatusScreen({currentStatus, followup, onBack, onSave}) {
             </View>
           )}
 
-          <Pressable onPress={() => onSave(selectedStatus)} style={({pressed}) => [styles.updateButton, pressed && styles.pressed]}>
-            <Text style={styles.updateButtonText}>Update Status</Text>
+          <Pressable disabled={isSaving} onPress={updateStatus} style={({pressed}) => [styles.updateButton, isSaving && styles.updateButtonDisabled, pressed && styles.pressed]}>
+            <Text style={styles.updateButtonText}>{isSaving ? 'Updating Status...' : 'Update Status'}</Text>
           </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -156,7 +238,7 @@ const styles = StyleSheet.create({
   currentStatusCard: {height: 64, borderRadius: 10, borderWidth: 1, borderColor: '#E1E5EF', backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, marginBottom: 12}, currentIcon: {width: 29, height: 29}, currentTitle: {color: '#172047', fontSize: 14, fontWeight: '600'}, currentSubtitle: {color: '#68718C', fontSize: 11.5, marginTop: 4},
   optionCard: {minHeight: 64, borderRadius: 10, borderWidth: 1, borderColor: '#E1E5EF', backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, marginBottom: 8}, optionSelected: {borderWidth: 1.5, borderColor: '#6955FA', backgroundColor: '#FAF9FF'}, optionIcon: {width: 28, height: 28}, optionText: {flex: 1, marginLeft: 12}, optionTitle: {color: '#172047', fontSize: 13.5, fontWeight: '600'}, selectedText: {color: '#3D2DCE'}, optionSubtitle: {color: '#68718C', fontSize: 10.5, marginTop: 4}, radio: {width: 19, height: 19, borderRadius: 10, borderWidth: 1.5, borderColor: '#929AB5', alignItems: 'center', justifyContent: 'center'}, radioSelected: {borderColor: '#5A3FF2'}, radioDot: {width: 11, height: 11, borderRadius: 6, backgroundColor: '#5A3FF2'},
   followUpSection: {marginTop: 7}, followUpHeading: {color: '#452EE5', fontSize: 13, fontWeight: '600', marginBottom: 10}, fieldLabel: {color: '#242C53', fontSize: 12.5, fontWeight: '500', marginBottom: 6}, inputBox: {height: 44, borderRadius: 8, borderWidth: 1, borderColor: '#D8DDE9', backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 11, marginBottom: 10}, inputValue: {flex: 1, color: '#172047', fontSize: 13}, fieldIcon: {width: 18, height: 18}, noteBox: {height: 91, borderRadius: 8, borderWidth: 1, borderColor: '#D8DDE9', backgroundColor: '#FFFFFF', paddingHorizontal: 10, paddingTop: 8, marginBottom: 12}, noteInput: {flex: 1, color: '#172047', fontSize: 13, padding: 0}, counter: {alignSelf: 'flex-end', color: '#69718D', fontSize: 10.5, marginBottom: 6},
-  updateButton: {height: 49, borderRadius: 8, backgroundColor: '#07113D', alignItems: 'center', justifyContent: 'center', marginTop: 8}, updateButtonText: {color: '#FFFFFF', fontSize: 15, fontWeight: '500'}, pressed: {opacity: 0.85},
+  updateButton: {height: 49, borderRadius: 8, backgroundColor: '#07113D', alignItems: 'center', justifyContent: 'center', marginTop: 8}, updateButtonDisabled: {opacity: 0.65}, updateButtonText: {color: '#FFFFFF', fontSize: 15, fontWeight: '500'}, pressed: {opacity: 0.85},
   modalBackdrop: {flex: 1, backgroundColor: 'rgba(7, 17, 61, 0.42)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 22}, pickerCard: {width: '100%', maxHeight: 480, borderRadius: 16, backgroundColor: '#FFFFFF', padding: 18}, pickerTitle: {color: '#11183A', fontSize: 17, fontWeight: '600', textAlign: 'center', marginBottom: 14}, monthNavigation: {height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 7}, monthArrowButton: {width: 40, height: 36, alignItems: 'center', justifyContent: 'center'}, monthArrow: {color: '#3525B8', fontSize: 30, lineHeight: 31}, monthTitle: {color: '#3525B8', fontSize: 14, fontWeight: '600', textAlign: 'center'}, daysGrid: {flexDirection: 'row', flexWrap: 'wrap'}, dayButton: {width: '14.28%', height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center'}, dayText: {color: '#263052', fontSize: 13}, pickerSelected: {backgroundColor: '#4D32F4'}, pickerSelectedText: {color: '#FFFFFF', fontWeight: '600'}, timeList: {maxHeight: 350}, timeButton: {height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginBottom: 5}, timeText: {color: '#263052', fontSize: 14},
 });
 

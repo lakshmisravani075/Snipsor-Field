@@ -75,7 +75,7 @@ function LoginScreen({onSendOtp}) {
 
   return (
     <SafeAreaView style={styles.screen}>
-      <StatusBar hidden />
+      <StatusBar backgroundColor="transparent" hidden translucent />
       <View style={styles.screen}>
         <ImageBackground
           source={heroArtwork}

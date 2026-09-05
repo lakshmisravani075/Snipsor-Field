@@ -4,6 +4,8 @@ import {
   Image,
   Modal,
   NativeModules,
+  PermissionsAndroid,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -42,6 +44,20 @@ function FilesMediaScreen({initialPhotos = [], onBack, onSave}) {
     setSourceOpen(false);
     try {
       if (source === 'Camera') {
+        if (Platform.OS === 'android') {
+          const cameraPermission = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.CAMERA,
+            {
+              title: 'Camera permission',
+              message: 'Allow Snipsor Field to take salon photos.',
+              buttonPositive: 'Allow',
+              buttonNegative: 'Cancel',
+            },
+          );
+          if (cameraPermission !== PermissionsAndroid.RESULTS.GRANTED) {
+            return;
+          }
+        }
         const response = await launchCamera({mediaType: 'photo', quality: 0.9});
         if (response.errorMessage) {
           Alert.alert('Camera unavailable', response.errorMessage);
@@ -135,7 +151,7 @@ const styles = StyleSheet.create({
   header: {height: 55, backgroundColor: '#07113D', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14},
   backButton: {width: 30, height: 40, justifyContent: 'center', marginRight: 9},
   backArrow: {color: '#FFFFFF', fontSize: 19, lineHeight: 24},
-  headerTitle: {color: '#FFFFFF', fontSize: 17, fontWeight: '600'},
+  headerTitle: {color: '#FFFFFF', fontSize: 17, fontFamily: 'Poppins_600SemiBold'},
   progressArea: {backgroundColor: '#07113D', paddingHorizontal: 20, paddingBottom: 15},
   stepText: {color: '#FFFFFF', fontSize: 12, fontWeight: '500', marginBottom: 9},
   progressTrack: {height: 6, borderRadius: 4, overflow: 'hidden', backgroundColor: '#61749C'},

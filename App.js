@@ -7,36 +7,45 @@ import HomeScreen from './src/screens/home/HomeScreen.js';
 import SplashScreen from './src/screens/login/SplashScreen.js';
 import OnboardingTasksScreen from './src/screens/onboarding/screens/OnboardingTasksScreen.js';
 import ActivationScreen from './src/screens/activation/ActivationScreen.js';
+import {clearAuthToken} from './src/services/apiService.js';
 
 const ONBOARDING_USER_MOBILE = '9000000002';
 const ACTIVATION_USER_MOBILE = '9000000003';
 
 function App() {
-  const isTestEnvironment = process.env.NODE_ENV === 'test';
-  const [isSplashVisible, setIsSplashVisible] = useState(!isTestEnvironment);
+  const [isSplashVisible, setIsSplashVisible] = useState(true);
   const [mobileNumber, setMobileNumber] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showActivation, setShowActivation] = useState(false);
 
   useEffect(() => {
-    if (isTestEnvironment) {
-      return undefined;
-    }
     const splashTimer = setTimeout(() => setIsSplashVisible(false), 2200);
     return () => clearTimeout(splashTimer);
-  }, [isTestEnvironment]);
+  }, []);
 
   return (
     <SafeAreaProvider>
       {isSplashVisible ? (
         <SplashScreen />
       ) : showActivation ? (
-        <ActivationScreen />
+        <ActivationScreen onLogout={() => {
+          clearAuthToken();
+          setShowActivation(false);
+          setMobileNumber(null);
+        }} />
       ) : showOnboarding ? (
-        <OnboardingTasksScreen />
+        <OnboardingTasksScreen onLogout={() => {
+          clearAuthToken();
+          setShowOnboarding(false);
+          setMobileNumber(null);
+        }} />
       ) : isAuthenticated ? (
-        <HomeScreen />
+        <HomeScreen onLogout={() => {
+          clearAuthToken();
+          setIsAuthenticated(false);
+          setMobileNumber(null);
+        }} />
       ) : mobileNumber ? (
         <OtpScreen
           mobileNumber={mobileNumber}

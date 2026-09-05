@@ -18,10 +18,9 @@ import SalonAvailabilityScreen from './SalonAvailabilityScreen.js';
 import EmployeeAvailabilityScreen from './EmployeeAvailabilityScreen.js';
 import KycDetailsScreen from './KycDetailsScreen.js';
 import OnboardingStatusScreen from './OnboardingStatusScreen.js';
+import {Ionicons} from '@react-native-vector-icons/ionicons/static';
 
 const shopIcon = require('../../../assets/icons/detail-shop.png');
-const notificationIcon = require('../../../assets/icons/onboarding-notification.png');
-const stepCompleteIcon = require('../../../assets/icons/onboarding-step-complete.png');
 const onboardingStateBySalon = new Map();
 
 const STEPS = [
@@ -42,9 +41,9 @@ function ProgressStep({label, index, basicComplete, filesComplete, addressComple
   return (
     <Pressable accessibilityRole="button" disabled={!enabled} hitSlop={4} onPress={() => onPress(step)} style={[styles.stepRow, isCurrent && styles.currentStepRow]}>
       {index < STEPS.length - 1 && <View style={[styles.stepLine, isComplete && styles.stepLineComplete]} />}
-      {isComplete ? <Image source={stepCompleteIcon} resizeMode="contain" style={styles.completeStepIcon} /> : <View style={[styles.stepCircle, isCurrent && styles.currentCircle]}><Text style={[styles.stepNumber, isCurrent && styles.activeStepNumber]}>{step}</Text></View>}
+      {isComplete ? <Ionicons name="checkmark-circle" size={24} color="#20A765" /> : <View style={[styles.stepCircle, isCurrent && styles.currentCircle]}><Text style={[styles.stepNumber, isCurrent && styles.activeStepNumber]}>{step}</Text></View>}
       <Text style={[styles.stepLabel, isComplete && styles.completeLabel, isCurrent && styles.currentLabel]}>{label}</Text>
-      {isComplete && <Image source={stepCompleteIcon} resizeMode="contain" style={styles.completeBadgeIcon} />}
+      {isComplete && <Ionicons name="checkmark-circle" size={18} color="#20A765" />}
     </Pressable>
   );
 }
@@ -180,15 +179,15 @@ function SalonOnboardingScreen({salon, onBack}) {
     <SafeAreaView style={styles.screen}>
       <StatusBar barStyle="light-content" backgroundColor="#07113D" />
       <View style={styles.header}>
-        <Pressable accessibilityLabel="Go back" hitSlop={12} onPress={onBack} style={styles.backButton}><Text style={styles.backArrow}>←</Text></Pressable>
+        <Pressable accessibilityLabel="Go back" hitSlop={12} onPress={onBack} style={styles.backButton}><Ionicons name="arrow-back" size={20} color="#FFFFFF" /></Pressable>
         <Text style={styles.headerTitle}>Salon Details</Text>
-        <Pressable accessibilityLabel="Notifications" style={styles.notification}><Image source={notificationIcon} resizeMode="contain" style={styles.notificationIcon} /></Pressable>
+        <Pressable accessibilityLabel="Notifications" style={styles.notification}><Ionicons name="notifications-outline" size={23} color="#FFFFFF" /></Pressable>
       </View>
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.salonCard}>
           <View style={styles.shopTile}><Image source={shopIcon} resizeMode="contain" style={styles.shopImage} /></View>
-          <View style={styles.salonCopy}><Text style={styles.salonName}>{salon.name}</Text><Text style={styles.salonType}>Unisex Salon</Text><Text style={styles.salonLocation}>⌖  {salon.location}</Text></View>
+          <View style={styles.salonCopy}><Text style={styles.salonName}>{salon.name}</Text><Text style={styles.salonType}>Unisex Salon</Text><View style={styles.salonLocationRow}><Ionicons name="location-outline" size={11} color="#69718A" /><Text style={styles.salonLocation}>{salon.location}</Text></View></View>
           <Text style={styles.leadId}>{salon.leadId}</Text>
         </View>
 
@@ -199,7 +198,7 @@ function SalonOnboardingScreen({salon, onBack}) {
       </ScrollView>
 
       <View style={styles.footer}>
-        <Pressable onPress={() => kycComplete ? setSubmissionStatus(kycDetails?.reviewStatus || 'submitted') : !basicComplete ? setShowBasicDetails(true) : !filesComplete ? setShowFilesMedia(true) : !addressComplete ? setShowAddress(true) : setShowServices(true)} style={({pressed}) => [styles.continueButton, pressed && styles.pressed]}><Text style={styles.continueText}>{kycComplete ? 'Submit Onboarding' : !basicComplete ? 'Start Basic Details' : !filesComplete ? 'Continue Files & Media' : !addressComplete ? 'Continue Address' : 'Continue Services'}</Text><Text style={styles.continueArrow}>›</Text></Pressable>
+        <Pressable onPress={() => kycComplete ? setSubmissionStatus(kycDetails?.reviewStatus || 'submitted') : !basicComplete ? setShowBasicDetails(true) : !filesComplete ? setShowFilesMedia(true) : !addressComplete ? setShowAddress(true) : setShowServices(true)} style={({pressed}) => [styles.continueButton, pressed && styles.pressed]}><Text style={styles.continueText}>{kycComplete ? 'Submit Onboarding' : !basicComplete ? 'Start Basic Details' : !filesComplete ? 'Continue Files & Media' : !addressComplete ? 'Continue Address' : 'Continue Services'}</Text><Ionicons name="chevron-forward" size={17} color="#FFFFFF" /></Pressable>
       </View>
     </SafeAreaView>
   );
@@ -210,7 +209,7 @@ const styles = StyleSheet.create({
   header: {height: 62, backgroundColor: '#07113D', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14},
   backButton: {width: 30, height: 40, justifyContent: 'center', marginRight: 9},
   backArrow: {color: '#FFFFFF', fontSize: 19, lineHeight: 24, fontWeight: '400'},
-  headerTitle: {flex: 1, color: '#FFFFFF', fontSize: 17, fontWeight: '600'},
+  headerTitle: {flex: 1, color: '#FFFFFF', fontSize: 17, fontFamily: 'Poppins_600SemiBold'},
   notification: {width: 34, height: 34, alignItems: 'center', justifyContent: 'center'},
   notificationIcon: {width: 24, height: 24, tintColor: '#FFFFFF'},
   content: {padding: 14, paddingBottom: 20},
@@ -218,9 +217,10 @@ const styles = StyleSheet.create({
   shopTile: {width: 58, height: 58, borderRadius: 10, backgroundColor: '#F1EEFF', alignItems: 'center', justifyContent: 'center'},
   shopImage: {width: 38, height: 38, tintColor: '#5637EF'},
   salonCopy: {flex: 1, marginLeft: 12},
-  salonName: {color: '#111735', fontSize: 15, fontWeight: '600'},
+  salonName: {color: '#111735', fontSize: 15, fontFamily: 'Poppins_600SemiBold'},
   salonType: {color: '#626982', fontSize: 9, marginTop: 3},
-  salonLocation: {color: '#626982', fontSize: 9, marginTop: 5},
+  salonLocationRow: {flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 5},
+  salonLocation: {color: '#626982', fontSize: 9, fontFamily: 'Inter_400Regular'},
   leadId: {alignSelf: 'flex-start', color: '#9A9EB0', fontSize: 7.5},
   progressCard: {marginTop: 12, borderRadius: 12, borderWidth: 1, borderColor: '#E4E7F0', backgroundColor: '#FFFFFF', padding: 13},
   progressHeader: {flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between'},
@@ -243,7 +243,7 @@ const styles = StyleSheet.create({
   completeBadgeIcon: {marginLeft: 'auto', width: 25, height: 25},
   footer: {height: 70, paddingHorizontal: 14, paddingTop: 9, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#E5E8F0'},
   continueButton: {height: 46, borderRadius: 7, backgroundColor: '#07113D', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 13},
-  continueText: {color: '#FFFFFF', fontSize: 13, fontWeight: '600'},
+  continueText: {color: '#FFFFFF', fontSize: 13, fontFamily: 'Poppins_600SemiBold'},
   continueArrow: {position: 'absolute', right: 13, color: '#FFFFFF', fontSize: 25, lineHeight: 25},
   pressed: {opacity: 0.87},
 });
