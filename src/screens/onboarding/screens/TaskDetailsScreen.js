@@ -1,5 +1,6 @@
-import React from 'react';
+import React, {useEffect, useState} from 'react';
 import {
+  Alert,
   Image,
   Linking,
   Pressable,
@@ -11,6 +12,8 @@ import {
   View,
 } from 'react-native';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
+import {leadService} from '../../../services/apiService.js';
+import {mergeTaskDetails} from '../onboardingTasks.js';
 
 const mapPreview = require('../../../assets/images/relative/location-map-preview.png');
 const shopIcon = require('../../../assets/icons/detail-shop.png');
@@ -47,10 +50,37 @@ function InfoRow({icon, label, value}) {
   );
 }
 
-function TaskDetailsScreen({task, fromSalons = false, onBack, onContinue}) {
-  const compactPhone = task.phone.replace(/\s/g, '');
-  const address = `12, Main Road, ${task.location}`;
-  const handleCall = () => Linking.openURL(`tel:+91${compactPhone}`);
+function TaskDetailsScreen({task: summary, fromSalons = false, onBack, onContinue, onSessionExpired}) {
+  const [task, setTask] = useState(summary);
+  useEffect(() => {
+    let mounted = true;
+    const loadDetails = async () => {
+      if (!mounted) { return; }
+      try {
+        const response = await leadService.getLeadDetails(summary.id || summary.leadId);
+        const details = mergeTaskDetails(response, summary);
+        if (mounted) { setTask(details); }
+      } catch (error) {
+        if (!mounted) { return; }
+        if (error?.status === 401) {
+          Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onSessionExpired}]);
+          return;
+        }
+        Alert.alert('Unable to load lead details', error?.message || 'Please try again.', [
+          {text: 'Cancel', style: 'cancel'}, {text: 'Retry', onPress: loadDetails},
+        ]);
+      }
+    };
+    loadDetails();
+    return () => { mounted = false; };
+  }, [summary, onSessionExpired]);
+  const compactPhone = String(task.phone || '').replace(/\s/g, '');
+  const dialPhone = /^\d{10}$/.test(compactPhone) ? `+91${compactPhone}` : compactPhone;
+  const address = task.location || '';
+  const assignedDate = task.assignedOn ? new Date(task.assignedOn) : null;
+  const assignedOn = assignedDate && !Number.isNaN(assignedDate.getTime())
+    ? assignedDate.toLocaleDateString('en-GB', {day: '2-digit', month: 'short', year: 'numeric'}) : task.assignedOn || '';
+  const handleCall = () => Linking.openURL(`tel:${dialPhone}`);
   const handleNavigate = () => {
     const destination = encodeURIComponent(`${task.name}, ${address}`);
     return Linking.openURL(
@@ -72,7 +102,7 @@ function TaskDetailsScreen({task, fromSalons = false, onBack, onContinue}) {
             <View style={styles.shopTile}><Image source={shopIcon} resizeMode="contain" style={styles.shopImage} /></View>
             <View style={styles.salonCopy}>
               <Text style={styles.salonName}>{task.name}</Text>
-              <Text style={styles.businessType}>Unisex Salon</Text>
+              <Text style={styles.businessType}>{task.businessType || ''}</Text>
               <View style={styles.addressRow}><DetailIcon source={locationIcon} size={12} /><Text numberOfLines={2} style={styles.address}>{address}</Text></View>
               <View style={styles.distanceRow}><Ionicons name="navigate-outline" size={11} color="#6546EC" /><Text style={styles.distance}>{task.activity}</Text></View>
             </View>
@@ -86,8 +116,8 @@ function TaskDetailsScreen({task, fromSalons = false, onBack, onContinue}) {
           <View style={styles.metaGrid}>
             <MetaItem icon={leadIdIcon} label="Lead ID" value={task.leadId} />
             <MetaItem icon={assignedToIcon} label="Assigned To" value={task.assignee} />
-            <MetaItem icon={leadSourceIcon} label="Lead Source" value="Walk-in" />
-            <MetaItem icon={assignedOnIcon} label="Assigned On" value="12 May 2026" />
+            <MetaItem icon={leadSourceIcon} label="Lead Source" value={task.leadSource || ''} />
+            <MetaItem icon={assignedOnIcon} label="Assigned On" value={assignedOn} />
           </View>
 
           <View style={styles.mapWrap}>
@@ -100,14 +130,14 @@ function TaskDetailsScreen({task, fromSalons = false, onBack, onContinue}) {
         <View style={styles.infoCard}>
           <View style={styles.sectionHeading}><View style={styles.sectionIcon}><DetailIcon source={contactIcon} size={23} tintColor="#FFFFFF" /></View><Text style={styles.sectionTitle}>Lead Information</Text></View>
           <InfoRow icon={contactIcon} label="Contact Person" value={task.contact} />
-          <InfoRow icon={phoneIcon} label="Phone Number" value={`+91 ${compactPhone}`} />
-          <InfoRow icon={whatsappIcon} label="WhatsApp Number" value={`+91 ${compactPhone}`} />
-          <InfoRow icon={shopIcon} label="Business Type" value="Unisex Salon" />
+          <InfoRow icon={phoneIcon} label="Phone Number" value={dialPhone} />
+          <InfoRow icon={whatsappIcon} label="WhatsApp Number" value={task.whatsapp || ''} />
+          <InfoRow icon={shopIcon} label="Business Type" value={task.businessType || ''} />
         </View>
       </ScrollView>
 
       <View style={styles.bottomActionWrap}>
-        <Pressable onPress={onContinue} style={({pressed}) => [styles.continueButton, pressed && styles.pressed]}><View style={styles.continueLabel}><Ionicons name="play-circle-outline" size={18} color="#FFFFFF" /><Text style={styles.continueText}>{task.status === 'New' ? 'Start Onboarding' : 'Continue Onboarding'}</Text></View><Ionicons name="chevron-forward" size={17} color="#FFFFFF" /></Pressable>
+        <Pressable onPress={() => onContinue(task)} style={({pressed}) => [styles.continueButton, pressed && styles.pressed]}><View style={styles.continueLabel}><Ionicons name="play-circle-outline" size={18} color="#FFFFFF" /><Text style={styles.continueText}>{task.status === 'New' ? 'Start Onboarding' : 'Continue Onboarding'}</Text></View><Ionicons name="chevron-forward" size={17} color="#FFFFFF" /></Pressable>
       </View>
     </SafeAreaView>
   );

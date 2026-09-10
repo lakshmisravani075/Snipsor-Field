@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
+import {formatAssignedOn} from '../onboardingTasks.js';
 
 const STATUS_COLORS = {
   New: {text: '#5A39EF', background: '#F0EDFF', icon: '#775DFF'},
@@ -38,7 +39,7 @@ function SalonCard({salon, onPress, onOnboard}) {
           <Text style={styles.salonName}>{salon.name}</Text>
           <View style={styles.detailRow}><Ionicons name="location-outline" size={10} color="#72788E" /><Text numberOfLines={1} style={styles.detail}>{salon.location}</Text></View>
           <View style={styles.detailRow}><Ionicons name="person-outline" size={10} color="#72788E" /><Text style={styles.detail}>{salon.contact}  •  +91 {salon.phone}</Text></View>
-          <View style={styles.detailRow}><Ionicons name="calendar-outline" size={10} color="#72788E" /><Text style={styles.detail}>Assigned on: 12 May 2026</Text></View>
+          <View style={styles.detailRow}><Ionicons name="calendar-outline" size={10} color="#72788E" /><Text style={styles.detail}>{salon.assignedOn ? `Assigned on: ${formatAssignedOn(salon.assignedOn)}` : 'Assignment pending'}</Text></View>
         </View>
         <View style={[styles.statusPill, {backgroundColor: palette.background}]}><Text style={[styles.statusText, {color: palette.text}]}>{salon.status}</Text></View>
       </View>

@@ -1,24 +1,103 @@
-import React, {useState} from 'react';
-import {Image, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, View} from 'react-native';
+import React, {useEffect, useState} from 'react';
+import {Alert, Image, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, View} from 'react-native';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
+import {onboardingService} from '../../../services/apiService';
 const saveIcon = require('../../../assets/icons/salon-availability-save.png');
 
-const INITIAL_DAYS = [
-  {day:'Monday', open:true, from:'09:00 AM', to:'09:00 PM'},
-  {day:'Tuesday', open:true, from:'09:00 AM', to:'09:00 PM'},
-  {day:'Wednesday', open:true, from:'', to:''},
-  {day:'Thursday', open:true, from:'10:00 AM', to:'08:00 PM'},
-  {day:'Friday', open:true, from:'10:00 AM', to:'08:00 PM'},
-  {day:'Saturday', open:false, from:'', to:''},
-  {day:'Sunday', open:false, from:'', to:''},
-];
 const TIMES = ['00:00','07:00 AM','07:30 AM','08:00 AM','08:30 AM','09:00 AM','09:30 AM','10:00 AM','10:30 AM','11:00 AM','11:30 AM','12:00 PM','12:30 PM','01:00 PM','06:00 PM','08:00 PM','09:00 PM'];
-const DATES = ['Sep 08','Sep 09','Sep 10','Sep 11','Sep 12','Sep 13','Sep 14'];
+const asRecords = response => {
+  const find = (value, depth = 0) => {
+    if (depth > 5 || !value) return [];
+    if (Array.isArray(value)) {
+      if (value.some(record => record && typeof record === 'object' && (record.date || record.availability_date || record.open_time || record.opening_time))) return value;
+      for (const item of value) { const records = find(item, depth + 1); if (records.length) return records; }
+      return [];
+    }
+    if (typeof value !== 'object') return [];
+    for (const key of ['availability', 'salon_availability', 'availability_state', 'working_hours', 'schedule', 'data']) {
+      const records = find(value[key], depth + 1);
+      if (records.length) return records;
+    }
+    for (const [key, nested] of Object.entries(value)) {
+      if (['availability', 'salon_availability', 'availability_state', 'working_hours', 'schedule', 'data'].includes(key)) continue;
+      const records = find(nested, depth + 1);
+      if (records.length) return records;
+    }
+    return [];
+  };
+  return find(response?.data ?? response);
+};
+const asBoolean = value => value === true || value === 1 || String(value).trim().toLowerCase() === 'true' || String(value).trim() === '1';
+const formatTime = value => {
+  if (!value || value === '00:00:00') return '';
+  const [hours, minutes] = String(value).split(':').map(Number);
+  const suffix = hours >= 12 ? 'PM' : 'AM';
+  return `${String((hours % 12) || 12).padStart(2, '0')}:${String(minutes).padStart(2, '0')} ${suffix}`;
+};
+const toApiTime = value => {
+  if (!value || value === '00:00') return '00:00:00';
+  const match = String(value).match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return `${value}:00`;
+  let hours = Number(match[1]) % 12;
+  if (match[3].toUpperCase() === 'PM') hours += 12;
+  return `${String(hours).padStart(2, '0')}:${match[2]}:00`;
+};
+const displayDate = value => new Date(`${value}T00:00:00`).toLocaleDateString('en-US', {month:'short', day:'2-digit'});
+const displayDay = value => new Date(`${value}T00:00:00`).toLocaleDateString('en-US', {weekday:'long'});
+const localDate = value => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+const fallbackDays = () => Array.from({length: 7}, (_, index) => {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + index);
+  const value = localDate(date);
+  return {date: value, day: displayDay(value), dateLabel: displayDate(value), open: true, from: '09:00 AM', to: '09:00 PM'};
+});
 
-function SalonAvailabilityScreen({initialDays, onBack, onSave}) {
-  const [days, setDays] = useState(initialDays?.length ? initialDays : INITIAL_DAYS);
+export const readAvailability = response => asRecords(response).map(record => ({
+  id: record.id,
+  date: String(record.date || record.availability_date),
+  day: displayDay(record.date || record.availability_date),
+  dateLabel: displayDate(record.date || record.availability_date),
+  open: record.is_open !== undefined || record.is_available !== undefined
+    ? asBoolean(record.is_open ?? record.is_available)
+    : !asBoolean(record.is_holiday ?? record.is_closed ?? record.closed),
+  from: formatTime(record.open_time ?? record.opening_time ?? record.start_time),
+  to: formatTime(record.close_time ?? record.closing_time ?? record.end_time),
+}));
+
+export const availabilityPayload = days => ({
+  availability: days.map(day => ({
+    date: day.date,
+    open_time: day.open ? toApiTime(day.from) : '00:00:00',
+    close_time: day.open ? toApiTime(day.to) : '00:00:00',
+    is_holiday: !day.open,
+  })),
+});
+
+function SalonAvailabilityScreen({salonId, initialDays, onBack, onSave}) {
+  const [days, setDays] = useState(initialDays?.length ? initialDays : fallbackDays);
   const [expanded, setExpanded] = useState(null);
   const [timeMenu, setTimeMenu] = useState(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        let values = readAvailability(await onboardingService.getAvailabilityState(salonId));
+        // Some deployed state responses contain progress metadata only. In
+        // that case read the persisted availability resource before falling
+        // back to the editor's initial values.
+        if (!values.length) {
+          try { values = readAvailability(await onboardingService.getAvailability(salonId)); } catch { /* State data remains the fallback. */ }
+        }
+        if (active) setDays(current => values.length ? values : (current.length ? current : fallbackDays()));
+      } catch (error) {
+        if (active) Alert.alert('Unable to load availability', error?.message || 'Please try again.');
+      }
+    };
+    load();
+    return () => { active = false; };
+  }, [salonId]);
   const update = (index, values) => setDays(current => current.map((item, i) => i === index ? {...item, ...values} : item));
   const getStatus = item => {
     if (!item.open) return 'Closed';
@@ -33,13 +112,13 @@ function SalonAvailabilityScreen({initialDays, onBack, onSave}) {
       <View style={s.info}><Text style={s.infoIcon}>ⓘ</Text><Text style={s.infoText}><Text style={s.infoStrong}>Set your working hours for each day.</Text>{`\n`}These timings will be visible while booking.</Text></View>
       <View style={s.daysCard}>{days.map((item,index) => {const status=getStatus(item); return <View key={item.day} style={[s.dayCard,expanded===index&&s.dayCardOpen]}>
         <Pressable onPress={() => {setExpanded(value => value === index ? null : index);setTimeMenu(null);}} style={s.dayRow}>
-          <View style={s.dayCopy}><Text style={s.dayName}>{item.day}</Text><Text style={s.date}>{DATES[index]}</Text></View>
+          <View style={s.dayCopy}><Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85} style={s.dayName}>{item.day}</Text><Text style={s.date}>{item.dateLabel}</Text></View>
           <View style={s.summary}>{status==='Open' ? <View style={s.timeLine}><Text style={s.time}>{item.from}</Text><Text style={s.dash}>—</Text><Text style={s.time}>{item.to}</Text></View> : <Text style={status==='Not set'?s.notSet:s.closedText}>{status}</Text>}</View>
           <View style={[s.pill,status==='Open'?s.openPill:s.closedPill]}><Text style={[s.pillText,status!=='Open'&&s.closedPillText]}>{status==='Not set'?'Open':status}</Text></View>
           <View style={[s.chevron,expanded===index&&s.chevronUp]} />
         </Pressable>
         {expanded === index && <View style={s.editor}>
-          <View style={s.toggleRow}><View><Text style={s.editorLabel}>{item.day}</Text><Text style={s.date}>{DATES[index]}</Text></View><View style={s.toggleControl}><Pressable onPress={() => update(index,{open:!item.open})} style={[s.toggle,item.open&&s.toggleOn]}><View style={[s.thumb,item.open&&s.thumbOn]} /></Pressable><Text style={s.openLabel}>{item.open?'Open':'Closed'}</Text></View></View>
+          <View style={s.toggleRow}><View><Text style={s.editorLabel}>{item.day}</Text><Text style={s.date}>{item.dateLabel}</Text></View><View style={s.toggleControl}><Pressable onPress={() => update(index,{open:!item.open})} style={[s.toggle,item.open&&s.toggleOn]}><View style={[s.thumb,item.open&&s.thumbOn]} /></Pressable><Text style={s.openLabel}>{item.open?'Open':'Closed'}</Text></View></View>
           {item.open && <><View style={s.timeFields}><View style={s.timeColumn}><Text style={s.timeLabel}>Start Time</Text><Pressable onPress={() => setTimeMenu({index,key:'from'})} style={[s.timeField,timeMenu?.index===index&&timeMenu.key==='from'&&s.timeFieldActive]}><Text style={s.clock}>◷</Text><Text style={s.fieldValue}>{item.from||'00:00'}</Text><View style={[s.smallChevron,timeMenu?.index===index&&timeMenu.key==='from'&&s.smallChevronUp]}/></Pressable></View><View style={s.timeColumn}><Text style={s.timeLabel}>End Time</Text><Pressable onPress={() => setTimeMenu({index,key:'to'})} style={[s.timeField,timeMenu?.index===index&&timeMenu.key==='to'&&s.timeFieldActive]}><Text style={s.clock}>◷</Text><Text style={s.fieldValue}>{item.to||'00:00'}</Text><View style={[s.smallChevron,timeMenu?.index===index&&timeMenu.key==='to'&&s.smallChevronUp]}/></Pressable></View></View>
           {timeMenu?.index===index&&<View style={s.timeMenu}><View style={s.timeMenuHead}><Text style={s.timeMenuTitle}>Select {timeMenu.key==='from'?'Start':'End'} Time</Text><Pressable hitSlop={8} onPress={()=>setTimeMenu(null)}><Text style={s.timeMenuClose}>×</Text></Pressable></View><ScrollView nestedScrollEnabled style={s.timeOptions}>{TIMES.map(value=><Pressable key={value} onPress={()=>{update(index,{[timeMenu.key]:value});setTimeMenu(null);}} style={[s.timeOption,(item[timeMenu.key]||'00:00')===value&&s.timeOptionSelected]}><Text style={s.optionClock}>◷</Text><Text style={s.timeOptionText}>{value}</Text>{(item[timeMenu.key]||'00:00')===value&&<Text style={s.timeCheck}>✓</Text>}</Pressable>)}</ScrollView></View>}</>}
           <View style={s.editorActions}><Pressable onPress={() => {setExpanded(null);setTimeMenu(null);}} style={s.editorCancel}><Text style={s.cancelText}>Cancel</Text></Pressable><Pressable onPress={() => {setExpanded(null);setTimeMenu(null);}} style={s.editorSave}><Image source={saveIcon} resizeMode="contain" style={s.saveIcon}/><Text style={s.saveText}>Save {item.day}</Text></Pressable></View>
@@ -47,7 +126,7 @@ function SalonAvailabilityScreen({initialDays, onBack, onSave}) {
       </View>})}</View>
       <View style={s.note}><View style={s.calendar}><View style={s.calendarTop} /><View style={s.calendarDotRow}><View style={s.calendarDot} /><View style={s.calendarDot} /></View></View><Text style={s.noteText}><Text style={s.noteStrong}>Note:</Text> Closed days will not be{`\n`}shown to customers for booking.</Text></View>
     </ScrollView>
-    <View style={s.footer}><Pressable onPress={onBack} style={s.cancel}><Text style={s.cancelText}>Cancel</Text></Pressable><Pressable onPress={() => onSave(days)} style={s.save}><Text style={s.saveText}>Save &amp; Continue</Text></Pressable></View>
+    <View style={s.footer}><Pressable onPress={onBack} style={s.cancel}><Text style={s.cancelText}>Cancel</Text></Pressable><Pressable disabled={saving} onPress={async () => { if (saving) return; const values = days.length ? days : fallbackDays(); if (!days.length) setDays(values); setSaving(true); try { await onboardingService.saveAvailability(salonId, availabilityPayload(values)); onSave(values); } catch (error) { Alert.alert('Unable to save availability', error?.message || 'Please try again.'); } finally { setSaving(false); } }} style={s.save}><Text style={s.saveText}>Save &amp; Continue</Text></Pressable></View>
   </SafeAreaView>;
 }
 

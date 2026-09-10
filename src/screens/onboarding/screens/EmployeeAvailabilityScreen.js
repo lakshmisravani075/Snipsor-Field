@@ -1,38 +1,85 @@
-import React, {useState} from 'react';
-import {Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
+import React, {useEffect, useRef, useState} from 'react';
+import {Alert, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
+import {onboardingService} from '../../../services/apiService';
+import {readEmployees} from './EmployeesScreen';
+import {readAvailability} from './SalonAvailabilityScreen';
 
-const DATES=['Sep 08','Sep 09','Sep 10','Sep 11','Sep 12','Sep 13','Sep 14'];
 const TIMES=['00:00','07:00 AM','07:30 AM','08:00 AM','08:30 AM','09:00 AM','09:30 AM','10:00 AM','10:30 AM','11:00 AM','11:30 AM','12:00 PM','12:30 PM','01:00 PM','06:00 PM','08:00 PM','09:00 PM'];
-const FALLBACK=[
-  {day:'Monday',open:true,from:'09:00 AM',to:'09:00 PM'},{day:'Tuesday',open:true,from:'09:00 AM',to:'09:00 PM'},
-  {day:'Wednesday',open:true,from:'09:00 AM',to:'09:00 PM'},{day:'Thursday',open:true,from:'10:00 AM',to:'08:00 PM'},
-  {day:'Friday',open:true,from:'10:00 AM',to:'08:00 PM'},{day:'Saturday',open:false,from:'',to:''},{day:'Sunday',open:false,from:'',to:''},
-];
 const statusOf=x=>!x.open?'Closed':(!x.from||!x.to||x.from==='00:00'||x.to==='00:00')?'Not set':'Open';
+const formatTime=value=>{if(!value||value==='00:00:00')return '';const [hours,minutes]=String(value).split(':').map(Number);return `${String((hours%12)||12).padStart(2,'0')}:${String(minutes).padStart(2,'0')} ${hours>=12?'PM':'AM'}`;};
+const apiTime=value=>{if(!value||value==='00:00')return '00:00:00';const match=String(value).match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);if(!match)return `${value}:00`;let hours=Number(match[1])%12;if(match[3].toUpperCase()==='PM')hours+=12;return `${String(hours).padStart(2,'0')}:${match[2]}:00`;};
+const dayName=date=>new Date(`${date}T00:00:00`).toLocaleDateString('en-US',{weekday:'long'});
+const dateLabel=date=>new Date(`${date}T00:00:00`).toLocaleDateString('en-US',{month:'short',day:'2-digit'});
+const recordMemberId=record=>String(record.saloon_member_id||record.salon_member_id||record.member_id||record.employee_id||'');
+const fallbackDays=()=>Array.from({length:7},(_,index)=>{const value=new Date();value.setHours(0,0,0,0);value.setDate(value.getDate()+index);const date=`${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,'0')}-${String(value.getDate()).padStart(2,'0')}`;return {date,day:dayName(date),dateLabel:dateLabel(date),open:true,from:'',to:''};});
+export const readEmployeeAvailability=(response,memberId)=>{const data=response?.data??response;const records=Array.isArray(data)?data:(data?.availability||data?.employee_availability||data?.salon_availability||data?.data?.availability||data?.data?.employee_availability||[]);return(Array.isArray(records)?records:[]).filter(record=>!recordMemberId(record)||recordMemberId(record)===String(memberId)).map(record=>({id:record.id,date:String(record.date),day:dayName(record.date),dateLabel:dateLabel(record.date),open:!record.is_holiday,from:formatTime(record.open_time),to:formatTime(record.close_time)}));};
+export const employeeAvailabilityPayload=days=>({availability:days.map(day=>({date:day.date,open_time:day.open?apiTime(day.from):'00:00:00',close_time:day.open?apiTime(day.to):'00:00:00',is_holiday:!day.open}))});
 
-function EmployeeAvailabilityScreen({employees=[],salonDays=[],initialDays,onBack,onSave}){
-  const people=employees.length?employees:[{id:'employee',first:'Ramesh',last:'Kumar',role:'Stylist',gender:'Male'}];
-  const base=salonDays.length?salonDays:FALLBACK;
-  const [selected,setSelected]=useState(people[0]); const [employeeOpen,setEmployeeOpen]=useState(false);
+function EmployeeAvailabilityScreen({salonId,employees=[],salonDays=[],initialDays,onBack,onSave}){
+  const [people,setPeople]=useState(employees);
+  const [base,setBase]=useState(salonDays);
+  const [selected,setSelected]=useState(people[0]||null); const [employeeOpen,setEmployeeOpen]=useState(false);
   const [employeeSearch,setEmployeeSearch]=useState('');
-  const [days,setDays]=useState(initialDays?.length?initialDays:base.map(x=>({...x})));
+  const [days,setDays]=useState(initialDays?.length?initialDays:base.length?base.map(x=>({...x})):fallbackDays());
   const [expanded,setExpanded]=useState(null); const [timeMenu,setTimeMenu]=useState(null);
-  const update=(i,v)=>setDays(a=>a.map((x,n)=>n===i?{...x,...v}:x));
-  const salonAt=i=>base[i]||FALLBACK[i];
+  const [availabilityByMember,setAvailabilityByMember]=useState({}); const [saving,setSaving]=useState(false);
+  const editRevision = useRef(0);
+  // This screen can be opened directly from an onboarding timeline, where the
+  // parent has not kept an in-memory copy of steps 5 and 6. Load those saved
+  // records here so employee selection and working hours are never static.
+  useEffect(()=>{let active=true;const load=async()=>{try{const [employeeResponse,availabilityResponse]=await Promise.all([onboardingService.getEmployees(salonId),onboardingService.getAvailabilityState(salonId)]);if(!active)return;const savedPeople=readEmployees(employeeResponse);let savedDays=readAvailability(availabilityResponse);if(!savedDays.length){try{savedDays=readAvailability(await onboardingService.getAvailability(salonId));}catch{/* The editable dynamic-date fallback remains available. */}}if(!active)return;setPeople(savedPeople);setBase(current=>savedDays.length?savedDays:current);setSelected(current=>current&&savedPeople.some(person=>person.id===current.id)?current:(savedPeople[0]||null));}catch(error){if(active)Alert.alert('Unable to load employee availability',error?.message||'Please try again.');}};load();return()=>{active=false;};},[salonId]);
+  const memberId = selected?.id;
+  const visibleDates = (base.length ? base : initialDays?.length ? initialDays : fallbackDays()).map(day => day.date).join(',');
+  useEffect(() => {
+    if (!salonId || !memberId || !people.length) { return undefined; }
+    let active = true;
+    const revision = editRevision.current;
+    const load = async () => {
+      try {
+        const response = await onboardingService.getEmployeeAvailabilityState(salonId);
+        const values = people.reduce((result, person) => ({...result, [person.id]: readEmployeeAvailability(response, person.id)}), {});
+        const dates = visibleDates.split(',');
+        const months = [...new Set(dates.map(date => date.slice(0, 7)))];
+        try {
+          const responses = await Promise.all(months.map(month => onboardingService.getMonthlyAvailability(month, memberId)));
+          // Reuse the existing date/time contract only. Unknown response shapes
+          // leave the existing availability intact; never expand the day list.
+          const monthly = responses.flatMap(result => readEmployeeAvailability(result, memberId));
+          const existing = values[memberId];
+          if (existing.length) {
+            values[memberId] = existing.map(day => monthly.find(record => record.date === day.date) || day);
+          } else {
+            values[memberId] = dates.map(date => monthly.find(record => record.date === date));
+            if (values[memberId].some(day => !day)) { values[memberId] = existing; }
+          }
+        } catch (error) {
+          if (active) { Alert.alert('Unable to load monthly availability', error?.message || 'Please try again.'); }
+        }
+        if (active && revision === editRevision.current) { setAvailabilityByMember(values); }
+      } catch (error) {
+        if (active) { Alert.alert('Unable to load employee availability', error?.message || 'Please try again.'); }
+      }
+    };
+    load();
+    return () => { active = false; };
+  }, [people, salonId, memberId, visibleDates]);
+  useEffect(()=>{if(!selected)return;const savedDays=availabilityByMember[selected.id];setDays(savedDays?.length?savedDays:(base.length?base.map(day=>({...day})):initialDays?.length?initialDays:fallbackDays()));},[selected,availabilityByMember,base,initialDays]);
+  const update=(i,v)=>{editRevision.current+=1;setDays(a=>a.map((x,n)=>n===i?{...x,...v}:x));};
+  const salonAt=i=>base[i]||{};
   return <SafeAreaView style={s.screen}>
     <StatusBar barStyle="light-content" backgroundColor="#07113D"/><View style={s.header}><Pressable accessibilityLabel="Go back" onPress={onBack} style={[s.back,s.backMedium]}><Ionicons name="arrow-back" size={21} color="#FFFFFF" /></Pressable><Text style={[s.headerTitle,s.headerTitleFont]}>Add Employee Availability</Text></View>
     <View style={s.progress}><Text style={s.step}>Step 7 of 8</Text><View style={s.track}><View style={s.fill}/></View></View>
     <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false} nestedScrollEnabled>
-      <Text style={s.sectionLabel}>Select Employee</Text><Pressable onPress={()=>{setEmployeeOpen(v=>!v);setEmployeeSearch('');}} style={[s.employeeSelect,employeeOpen&&s.employeeSelectOpen]}><View style={s.avatar}><Text style={s.avatarText}>{selected.first[0]}{selected.last[0]}</Text></View><View style={s.personCopy}><Text style={s.personName}>{selected.first} {selected.last}</Text><Text style={s.personMeta}>{selected.gender} • {selected.role}</Text></View><View style={[s.chevron,employeeOpen&&s.chevronUp]}/></Pressable>
-      {employeeOpen&&<View style={s.employeeOptions}><View style={s.searchBox}><View style={s.searchIcon}><View style={s.searchLens}><View style={s.searchHandle}/></View></View><TextInput value={employeeSearch} onChangeText={setEmployeeSearch} placeholder="Search employee" placeholderTextColor="#9AA5BB" style={s.searchInput}/></View>{people.filter(person=>`${person.first} ${person.last}`.toLowerCase().includes(employeeSearch.toLowerCase())).map(person=><Pressable key={person.id} onPress={()=>{setSelected(person);setEmployeeOpen(false);setEmployeeSearch('');}} style={[s.personOption,selected.id===person.id&&s.personOptionSelected]}><View style={s.avatarSmall}><Text style={s.avatarText}>{person.first[0]}{person.last[0]}</Text></View><View style={s.optionCopy}><Text style={s.optionName}>{person.first} {person.last}</Text><Text style={s.optionMeta}>{person.gender} • {person.role}</Text></View>{selected.id===person.id&&<Text style={s.check}>✓</Text>}</Pressable>)}</View>}
+      <Text style={s.sectionLabel}>Select Employee</Text>{selected&&<Pressable onPress={()=>{setEmployeeOpen(v=>!v);setEmployeeSearch('');}} style={[s.employeeSelect,employeeOpen&&s.employeeSelectOpen]}><View style={s.avatar}><Text style={s.avatarText}>{selected.first[0]}{selected.last[0]}</Text></View><View style={s.personCopy}><Text style={s.personName}>{selected.first} {selected.last}</Text><Text style={s.personMeta}>{selected.gender} • {selected.role}</Text></View><View style={[s.chevron,employeeOpen&&s.chevronUp]}/></Pressable>}
+      {employeeOpen&&<View style={s.employeeOptions}><View style={s.searchBox}><View style={s.searchIcon}><View style={s.searchLens}><View style={s.searchHandle}/></View></View><TextInput value={employeeSearch} onChangeText={setEmployeeSearch} placeholder="Search employee" placeholderTextColor="#9AA5BB" style={s.searchInput}/></View>{people.filter(person=>`${person.first} ${person.last}`.toLowerCase().includes(employeeSearch.toLowerCase())).map(person=><Pressable key={person.id} onPress={()=>{setSelected(person);setDays(availabilityByMember[person.id]?.length?availabilityByMember[person.id]:base.map(x=>({...x})));setEmployeeOpen(false);setEmployeeSearch('');}} style={[s.personOption,selected?.id===person.id&&s.personOptionSelected]}><View style={s.avatarSmall}><Text style={s.avatarText}>{person.first[0]}{person.last[0]}</Text></View><View style={s.optionCopy}><Text style={s.optionName}>{person.first} {person.last}</Text><Text style={s.optionMeta}>{person.gender} • {person.role}</Text></View>{selected?.id===person.id&&<Text style={s.check}>✓</Text>}</Pressable>)}</View>}
       <View style={s.info}><Text style={s.infoIcon}>ⓘ</Text><Text style={s.infoText}><Text style={s.infoStrong}>Set working hours for this employee.</Text>{`\n`}These timings will be visible while booking.</Text></View>
       <View style={s.dayList}>{days.map((item,i)=>{const salon=salonAt(i);const status=statusOf(item);return <View key={item.day} style={s.dayCard}><Pressable onPress={()=>{setExpanded(v=>v===i?null:i);setTimeMenu(null);}} style={s.dayRow}><View style={s.calendarIcon}><View style={s.calendarTop}/></View><View style={s.dayCopy}><Text style={s.dayName}>{item.day}</Text><Text style={[s.salonHours,!salon.open&&s.salonClosed]}>Salon hours: {salon.open&&salon.from&&salon.to?`${salon.from} — ${salon.to}`:'Closed'}</Text></View><Text style={[s.status,status==='Open'&&s.statusOpen]}>{status}</Text><View style={[s.chevron,expanded===i&&s.chevronUp]}/></Pressable>
-        {expanded===i&&<View style={s.editor}><View style={s.editorTop}><View><Text style={s.editorDay}>{item.day}</Text><Text style={s.date}>{DATES[i]}</Text></View><View style={s.toggleGroup}><Pressable onPress={()=>update(i,{open:!item.open})} style={[s.toggle,item.open&&s.toggleOn]}><View style={[s.thumb,item.open&&s.thumbOn]}/></Pressable><Text style={s.toggleText}>{item.open?'Open':'Closed'}</Text></View></View>
+        {expanded===i&&<View style={s.editor}><View style={s.editorTop}><View><Text style={s.editorDay}>{item.day}</Text><Text style={s.date}>{item.dateLabel}</Text></View><View style={s.toggleGroup}><Pressable onPress={()=>update(i,{open:!item.open})} style={[s.toggle,item.open&&s.toggleOn]}><View style={[s.thumb,item.open&&s.thumbOn]}/></Pressable><Text style={s.toggleText}>{item.open?'Open':'Closed'}</Text></View></View>
           {item.open&&<><View style={s.timeFields}><TimeField label="Start Time" value={item.from||'00:00'} active={timeMenu?.i===i&&timeMenu.key==='from'} onPress={()=>setTimeMenu({i,key:'from'})}/><TimeField label="End Time" value={item.to||'00:00'} active={timeMenu?.i===i&&timeMenu.key==='to'} onPress={()=>setTimeMenu({i,key:'to'})}/></View>{timeMenu?.i===i&&<View style={s.timeMenu}><View style={s.menuHead}><Text style={s.menuTitle}>Select {timeMenu.key==='from'?'Start':'End'} Time</Text><Pressable onPress={()=>setTimeMenu(null)}><Text style={s.close}>×</Text></Pressable></View><ScrollView style={s.options} nestedScrollEnabled>{TIMES.map(t=><Pressable key={t} onPress={()=>{update(i,{[timeMenu.key]:t});setTimeMenu(null);}} style={[s.timeOption,(item[timeMenu.key]||'00:00')===t&&s.selectedTime]}><Text style={s.clock}>◷</Text><Text style={s.timeText}>{t}</Text>{(item[timeMenu.key]||'00:00')===t&&<Text style={s.check}>✓</Text>}</Pressable>)}</ScrollView></View>}</>}
         </View>}</View>})}</View>
       <View style={s.note}><View style={s.noteCalendar}><View style={s.calendarTop}/></View><Text style={s.noteText}><Text style={s.noteStrong}>Note:</Text> Closed days will not be{`\n`}shown to customers for booking.</Text></View>
-    </ScrollView><View style={s.footer}><Pressable onPress={onBack} style={s.cancel}><Text style={s.cancelText}>Cancel</Text></Pressable><Pressable onPress={()=>onSave({employeeId:selected.id,days})} style={s.save}><Text style={s.saveText}>Save &amp; Continue</Text></Pressable></View>
+    </ScrollView><View style={s.footer}><Pressable onPress={onBack} style={s.cancel}><Text style={s.cancelText}>Cancel</Text></Pressable><Pressable disabled={saving||!selected||!days.length} onPress={async()=>{if(saving||!selected||!days.length)return;setSaving(true);try{await onboardingService.saveEmployeeAvailability(salonId,selected.id,employeeAvailabilityPayload(days));onSave({employeeId:selected.id,days});}catch(error){Alert.alert('Unable to save employee availability',error?.message||'Please try again.');}finally{setSaving(false);}}} style={s.save}><Text style={s.saveText}>Save &amp; Continue</Text></Pressable></View>
   </SafeAreaView>;
 }
 function TimeField({label,value,active,onPress}){return <View style={s.timeColumn}><Text style={s.timeLabel}>{label}</Text><Pressable onPress={onPress} style={[s.timeField,active&&s.activeField]}><Text style={s.bigClock}>◷</Text><Text style={s.fieldValue}>{value}</Text><View style={[s.smallChevron,active&&s.smallChevronUp]}/></Pressable></View>;}

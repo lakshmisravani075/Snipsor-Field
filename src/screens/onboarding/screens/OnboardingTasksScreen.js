@@ -1,5 +1,6 @@
-import React, {useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
+  Alert,
   Platform,
   Pressable,
   SafeAreaView,
@@ -15,14 +16,8 @@ import OnboardingSalonsScreen from './OnboardingSalonsScreen.js';
 import SalonOnboardingScreen from './SalonOnboardingScreen.js';
 import LogoutScreen from '../../profile/LogoutScreen.js';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
-
-const TASKS = [
-  {name: 'Hair & Beyond', location: 'Tirupati, Andhra Pradesh', contact: 'Meena Reddy', phone: '98765 43210', assignee: 'Maya Joshi', status: 'New', activity: '2.4 hrs away', leadId: 'LD-2026-452'},
-  {name: 'Looks Studio', location: 'Punganoor, Andhra Pradesh', contact: 'Ravi Kumar', phone: '91823 56789', assignee: 'Maya Joshi', status: 'In Progress', onboardingStep: 4, activity: '5.8 hrs away', leadId: 'LD-2026-448'},
-  {name: 'Style Lounge', location: 'Rajampet, Andhra Pradesh', contact: 'Suresh Babu', phone: '90123 45678', assignee: 'Maya Joshi', status: 'KYC Pending', onboardingStep: 8, activity: '6.1 hrs away', leadId: 'LD-2026-443'},
-  {name: 'Urban Cuts', location: 'Palamaner, Andhra Pradesh', contact: 'Anil Yadav', phone: '95000 98765', assignee: 'Maya Joshi', status: 'In Progress', onboardingStep: 6, activity: '6.8 hrs away', leadId: 'LD-2026-438'},
-  {name: 'The Men’s Point', location: 'Chittoor, Andhra Pradesh', contact: 'Venkatesh', phone: '98887 65432', assignee: 'Maya Joshi', status: 'New', activity: 'Yesterday', leadId: 'LD-2026-431'},
-];
+import {leadService, onboardingService} from '../../../services/apiService.js';
+import {extractSavedSalonId, extractTaskLeads, formatAssignedOn, mergeTaskDetails, normalizeOnboardingTask, resolveOnboardingResumeStep} from '../onboardingTasks.js';
 
 const STATUS_COLORS = {
   New: {text: '#5A39EF', background: '#F0EDFF', icon: '#775DFF'},
@@ -34,8 +29,11 @@ function ShopIcon({color}) {
   return <View style={[styles.shopTile, {backgroundColor: `${color}18`}]}><Ionicons name="storefront-outline" size={22} color={color} /></View>;
 }
 
-function TaskCard({task, onPress, onOnboard}) {
+function TaskCard({task, onPress, onOnboard, isLoading}) {
   const palette = STATUS_COLORS[task.status];
+  const assignment = task.assignee && task.assignee !== 'Name unavailable'
+    ? `Assigned to: ${task.assignee}`
+    : task.assignedOn ? `Assigned on: ${formatAssignedOn(task.assignedOn)}` : 'Assignment pending';
   return (
     <Pressable onPress={onPress} style={({pressed}) => [styles.taskCard, pressed && styles.taskCardPressed]}>
       <View style={styles.taskTop}>
@@ -44,11 +42,11 @@ function TaskCard({task, onPress, onOnboard}) {
           <Text style={styles.taskName}>{task.name}</Text>
           <View style={styles.detailRow}><Ionicons name="location-outline" size={10} color="#687087" /><Text numberOfLines={1} style={styles.detailLine}>{task.location}</Text></View>
           <View style={styles.detailRow}><Ionicons name="person-outline" size={10} color="#687087" /><Text style={styles.detailLine}>{task.contact}  •  {task.phone}</Text></View>
-          <View style={styles.detailRow}><Ionicons name="calendar-outline" size={10} color="#687087" /><Text style={styles.detailLine}>Assigned to: {task.assignee}</Text></View>
+          <View style={styles.detailRow}><Ionicons name="calendar-outline" size={10} color="#687087" /><Text style={styles.detailLine}>{assignment}</Text></View>
         </View>
       </View>
-      <Pressable onPress={event => { event.stopPropagation(); onOnboard(); }} style={({pressed}) => [styles.actionButton, pressed && styles.pressed]}>
-        <Text numberOfLines={1} style={styles.actionText}>{task.status === 'New' ? 'Start Onboarding' : 'Continue Onboarding'}</Text>
+      <Pressable disabled={isLoading} accessibilityState={{busy: isLoading}} onPress={event => { event.stopPropagation(); onOnboard(); }} style={({pressed}) => [styles.actionButton, pressed && styles.pressed]}>
+        <Text numberOfLines={1} style={styles.actionText}>{isLoading ? 'Loading...' : task.status === 'New' ? 'Start Onboarding' : 'Continue Onboarding'}</Text>
       </Pressable>
       <View style={styles.cardFooter}>
         <View style={styles.detailRow}><Ionicons name="navigate-outline" size={9} color="#6B48EE" /><Text style={styles.activity}>{task.activity}</Text></View>
@@ -64,26 +62,132 @@ function NavIcon({type, active}) {
   return <Ionicons name={name} size={22} color={color} />;
 }
 
-function OnboardingTasksScreen({onLogout}) {
+function OnboardingTasksScreen({onLogout, onOnboardingComplete}) {
+  const [tasks, setTasks] = useState([]);
   const [query, setQuery] = useState('');
   const [selectedTask, setSelectedTask] = useState(null);
   const [onboardingTask, setOnboardingTask] = useState(null);
   const [activeTab, setActiveTab] = useState('tasks');
   const [profileOrigin, setProfileOrigin] = useState('tasks');
+  const [loadingLeadId, setLoadingLeadId] = useState(null);
+  const timelineRequest = useRef({version: 0, loading: false});
+  useEffect(() => {
+    const request = timelineRequest.current;
+    setLoadingLeadId(null);
+    return () => {
+      request.version += 1;
+      request.loading = false;
+    };
+  }, [activeTab, selectedTask, onboardingTask]);
+  const openOnboarding = async task => {
+    if (timelineRequest.current.loading) { return; }
+    // A genuinely new lead has no onboarding record yet.  Do not make that
+    // first-start path depend on a timeline that does not exist.  Once a
+    // salon ID or a later step is present, always refresh from the backend,
+    // even if a stale list response still labels the lead as "New".
+    const hasSavedOnboarding = Boolean(extractSavedSalonId(task)) || Number(task?.onboardingStep) > 1;
+    if (task?.status === 'New' && !hasSavedOnboarding) {
+      setOnboardingTask(task);
+      setSelectedTask(null);
+      return;
+    }
+    const leadId = task?.leadId;
+    if (!leadId) {
+      Alert.alert('Unable to continue onboarding', 'The selected lead does not have a valid ID.');
+      return;
+    }
+    const version = ++timelineRequest.current.version;
+    timelineRequest.current.loading = true;
+    setLoadingLeadId(leadId);
+    try {
+      const [timeline, leadDetails] = await Promise.all([
+        leadService.getOnboardingTimeline(leadId),
+        leadService.getLeadDetails(leadId),
+      ]);
+      if (version !== timelineRequest.current.version) { return; }
+      if (timeline == null || typeof timeline !== 'object' || timeline.success === false) {
+        throw new Error(typeof timeline?.message === 'string' ? timeline.message : 'Unable to load the onboarding timeline. Please try again.');
+      }
+      const latestTask = mergeTaskDetails(leadDetails, task);
+      // Lead details and timeline are returned by different backend versions.
+      // Prefer a freshly discovered saved salon ID over the list's stale value
+      // so each step loads the same persisted onboarding record immediately.
+      const savedSalonId = extractSavedSalonId(leadDetails) || extractSavedSalonId(timeline) || extractSavedSalonId(latestTask);
+      // Hydrate Basic Details before mounting the onboarding screen.  Previously
+      // the form mounted empty while its own request was still in flight; going
+      // back gave that request time to finish, which made the second tap appear
+      // to work.  A failed hydration must not block a valid resume timeline.
+      let prefetchedBasicDetails = null;
+      if (savedSalonId && onboardingService?.getBasicDetails) {
+        try {
+          prefetchedBasicDetails = await onboardingService.getBasicDetails(savedSalonId);
+        } catch {
+          // The form retains its existing retry handling if this read fails.
+        }
+      }
+      if (version !== timelineRequest.current.version) { return; }
+      setOnboardingTask({...latestTask, ...(savedSalonId ? {salon_id: savedSalonId} : {}), onboardingStep: resolveOnboardingResumeStep(timeline, latestTask.onboardingStep), onboardingTimeline: timeline, prefetchedBasicDetails});
+      setSelectedTask(null);
+    } catch (error) {
+      if (version !== timelineRequest.current.version) { return; }
+      if (error?.status === 401) {
+        Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onLogout}]);
+      } else {
+        Alert.alert('Unable to continue onboarding', error?.message || 'Please try again.');
+      }
+    } finally {
+      if (version === timelineRequest.current.version) {
+        timelineRequest.current.loading = false;
+        setLoadingLeadId(null);
+      }
+    }
+  };
+  useEffect(() => {
+    if (selectedTask || onboardingTask || activeTab === 'profile') {
+      return undefined;
+    }
+    let mounted = true;
+    const loadTasks = async () => {
+      if (!mounted) { return; }
+      try {
+        const response = await leadService.getLeads();
+        // Completed salons belong to the Activation API, not the onboarding
+        // queue. Keep the cards unchanged; only omit records the backend has
+        // already marked as completed.
+        const nextTasks = extractTaskLeads(response).map(normalizeOnboardingTask)
+          .filter(task => !task.onboardingComplete);
+        if (nextTasks.some(task => !task.leadId)) {
+          throw new Error('A lead is missing its ID. Please try again.');
+        }
+        if (mounted) { setTasks(nextTasks); }
+      } catch (error) {
+        if (!mounted) { return; }
+        if (error?.status === 401) {
+          Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onLogout}]);
+          return;
+        }
+        Alert.alert('Unable to load tasks', error?.message || 'Please try again.', [
+          {text: 'Cancel', style: 'cancel'}, {text: 'Retry', onPress: loadTasks},
+        ]);
+      }
+    };
+    loadTasks();
+    return () => { mounted = false; };
+  }, [activeTab, selectedTask, onboardingTask, onLogout]);
   const openProfile = origin => {
     setProfileOrigin(origin);
     setActiveTab('profile');
   };
   const visibleTasks = useMemo(() => {
-    return TASKS.filter(task => `${task.name} ${task.contact} ${task.phone}`.toLowerCase().includes(query.trim().toLowerCase()));
-  }, [query]);
+    return tasks.filter(task => `${task.name} ${task.contact} ${task.phone}`.toLowerCase().includes(query.trim().toLowerCase()));
+  }, [query, tasks]);
 
   if (selectedTask) {
-    return <TaskDetailsScreen fromSalons={activeTab === 'salons'} task={selectedTask} onBack={() => setSelectedTask(null)} onContinue={() => {setOnboardingTask(selectedTask); setSelectedTask(null);}} />;
+    return <TaskDetailsScreen fromSalons={activeTab === 'salons'} task={selectedTask} onSessionExpired={onLogout} onBack={() => setSelectedTask(null)} onContinue={openOnboarding} />;
   }
 
   if (onboardingTask) {
-    return <SalonOnboardingScreen salon={onboardingTask} onBack={() => setOnboardingTask(null)} />;
+    return <SalonOnboardingScreen salon={onboardingTask} onBack={() => setOnboardingTask(null)} onOnboardingComplete={onOnboardingComplete} />;
   }
 
   if (activeTab === 'profile') {
@@ -103,7 +207,7 @@ function OnboardingTasksScreen({onLogout}) {
   }
 
   if (activeTab === 'salons') {
-    return <OnboardingSalonsScreen salons={TASKS} onTasks={() => setActiveTab('tasks')} onProfile={() => openProfile('salons')} onSelectSalon={setSelectedTask} onOnboard={setOnboardingTask} />;
+    return <OnboardingSalonsScreen salons={tasks} onTasks={() => setActiveTab('tasks')} onProfile={() => openProfile('salons')} onSelectSalon={setSelectedTask} onOnboard={openOnboarding} />;
   }
 
   return (
@@ -115,7 +219,7 @@ function OnboardingTasksScreen({onLogout}) {
 
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
         <View style={styles.searchBox}><Ionicons name="search-outline" size={19} color="#8B90A4" style={styles.searchIcon} /><TextInput value={query} onChangeText={setQuery} placeholder="Search by salon or contact" placeholderTextColor="#A1A5B5" style={styles.searchInput} /></View>
-        <View style={styles.taskList}>{visibleTasks.map(task => <TaskCard key={task.leadId} task={task} onPress={() => setSelectedTask(task)} onOnboard={() => setOnboardingTask(task)} />)}</View>
+        <View style={styles.taskList}>{visibleTasks.map(task => <TaskCard key={task.leadId} task={task} isLoading={loadingLeadId === task.leadId} onPress={() => setSelectedTask(task)} onOnboard={() => openOnboarding(task)} />)}</View>
       </ScrollView>
 
       <View style={styles.bottomBar}>

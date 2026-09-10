@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {
   Image,
   Pressable,
@@ -19,6 +19,8 @@ import EmployeeAvailabilityScreen from './EmployeeAvailabilityScreen.js';
 import KycDetailsScreen from './KycDetailsScreen.js';
 import OnboardingStatusScreen from './OnboardingStatusScreen.js';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
+import {onboardingService} from '../../../services/apiService.js';
+import {extractSavedSalonId, readSavedBeneficiary} from '../onboardingTasks.js';
 
 const shopIcon = require('../../../assets/icons/detail-shop.png');
 const onboardingStateBySalon = new Map();
@@ -34,6 +36,27 @@ const STEPS = [
   'KYC',
 ];
 
+const asBoolean = value => value === true || value === 1 || ['true', '1', 'yes'].includes(String(value).trim().toLowerCase());
+
+const readBasicDetails = (response, salonId) => {
+  if (!response || response.success === false) { return null; }
+  const container = response.data || response;
+  const record = container.salon_details || container.saloon_details || container.salon || container.saloon || container;
+  const name = record?.name ?? record?.salon_name ?? record?.salonName;
+  if (!record || typeof record !== 'object' || Array.isArray(record) || !name) { return null; }
+  const phone = String(record.mobile_number ?? record.mobileNumber ?? record.phone_number ?? record.phoneNumber ?? record.mobile ?? record.phone ?? '').replace(/\D/g, '');
+  const gstDetails = record.gst_details || record.gstDetails || {};
+  return {
+    salonId: String(salonId),
+    salonName: String(name),
+    mobileNumber: phone.length === 12 && phone.startsWith('91') ? phone.slice(2) : phone,
+    salonType: String(record.salon_type ?? record.salonType ?? ''),
+    gstRegistered: asBoolean(record.is_gst_registered ?? record.gst_registered ?? record.gstRegistered ?? record.gst_number_registered ?? record.is_gst_number_registered ?? gstDetails.registered ?? gstDetails.is_registered),
+    priceExclusive: typeof record.price_includes_tax === 'boolean' ? !record.price_includes_tax : Boolean(record.price_exclusive ?? record.priceExclusive),
+    gstNumber: String(record.gst_info ?? record.gst_number ?? record.gstNumber ?? record.gstin ?? record.gstin_number ?? record.gst_no ?? gstDetails.gst_number ?? gstDetails.gstin ?? ''),
+  };
+};
+
 function ProgressStep({label, index, basicComplete, filesComplete, addressComplete, servicesComplete, employeesComplete, availabilityComplete, employeeAvailabilityComplete, kycComplete, enabled, onPress}) {
   const step = index + 1;
   const isComplete = (step === 1 && basicComplete) || (step === 2 && filesComplete) || (step === 3 && addressComplete) || (step === 4 && servicesComplete) || (step === 5 && employeesComplete) || (step === 6 && availabilityComplete) || (step === 7 && employeeAvailabilityComplete) || (step === 8 && kycComplete);
@@ -48,15 +71,24 @@ function ProgressStep({label, index, basicComplete, filesComplete, addressComple
   );
 }
 
-function SalonOnboardingScreen({salon, onBack}) {
+function SalonOnboardingScreen({salon, onBack, onOnboardingComplete}) {
   const savedState = onboardingStateBySalon.get(salon.leadId) || {};
-  const persist = values => onboardingStateBySalon.set(salon.leadId, {...(onboardingStateBySalon.get(salon.leadId) || {}), ...values});
+  const persist = useCallback(values => {
+    onboardingStateBySalon.set(salon.leadId, {...(onboardingStateBySalon.get(salon.leadId) || {}), ...values});
+  }, [salon.leadId]);
+  const savedSalonId = salon.saloon_id || salon.salon_id;
+  const prefetchedBasicDetails = readBasicDetails(salon.prefetchedBasicDetails, savedSalonId);
   const savedResumeStep = savedState.employeeAvailabilityComplete ? 8 : savedState.availabilityComplete ? 7 : savedState.employeesComplete ? 6 : savedState.servicesComplete ? 5 : savedState.addressComplete ? 4 : savedState.filesComplete ? 3 : savedState.basicComplete ? 2 : null;
-  const resumeStep = salon.status === 'KYC Pending' ? 8 : savedResumeStep || salon.onboardingStep || 1;
-  const shouldResume = salon.status !== 'New';
+  const timelineResumeStep = salon.onboardingStep || 1;
+  // A complete saved Basic Details record means the next unfinished screen is
+  // Files & Media when an older timeline response still reports step 1.
+  const resumeStep = salon.status === 'KYC Pending' ? 8 : savedResumeStep || (prefetchedBasicDetails && timelineResumeStep === 1 ? 2 : timelineResumeStep);
+  // The list status can lag behind the actual onboarding record.  A saved
+  // salon ID or an API timeline step is authoritative for resume behavior.
+  const shouldResume = salon.status !== 'New' || Boolean(extractSavedSalonId(salon)) || resumeStep > 1;
   const [showBasicDetails, setShowBasicDetails] = useState(shouldResume && resumeStep === 1);
-  const [basicComplete, setBasicComplete] = useState(Boolean(savedState.basicComplete || resumeStep > 1));
-  const [basicDetails, setBasicDetails] = useState(savedState.basicDetails || null);
+  const [basicComplete, setBasicComplete] = useState(Boolean(savedState.basicComplete || prefetchedBasicDetails || resumeStep > 1));
+  const [basicDetails, setBasicDetails] = useState(savedState.basicDetails || prefetchedBasicDetails || null);
   const [showFilesMedia, setShowFilesMedia] = useState(shouldResume && resumeStep === 2);
   const [filesComplete, setFilesComplete] = useState(Boolean(savedState.filesComplete || resumeStep > 2));
   const [salonPhotos, setSalonPhotos] = useState(savedState.salonPhotos || []);
@@ -79,6 +111,63 @@ function SalonOnboardingScreen({salon, onBack}) {
   const [kycDetails, setKycDetails] = useState(savedState.kycDetails || null);
   const [kycComplete, setKycComplete] = useState(Boolean(savedState.kycComplete));
   const [submissionStatus, setSubmissionStatus] = useState(null);
+  const basicDetailsSalonId = basicDetails?.salonId || savedSalonId;
+  const viewingSubmission = Boolean(submissionStatus);
+
+  useEffect(() => {
+    if (!basicDetailsSalonId || savedState.kycComplete) { return undefined; }
+    let active = true;
+    const restoreSavedKyc = async () => {
+      try {
+        const beneficiary = readSavedBeneficiary(await onboardingService.getBeneficiary(basicDetailsSalonId));
+        if (!active || !beneficiary) { return; }
+        setKycDetails(current => ({...(current || {}), beneficiary}));
+        setKycComplete(true);
+        persist({kycDetails: {beneficiary}, kycComplete: true});
+        // A stale KYC_PENDING lead status can otherwise reopen the form even
+        // though the KYC record is already present on the server.
+        setShowKyc(false);
+      } catch {
+        // No saved beneficiary simply means this salon still needs KYC.
+      }
+    };
+    restoreSavedKyc();
+    return () => { active = false; };
+  }, [basicDetailsSalonId, persist, savedState.kycComplete]);
+
+  useEffect(() => {
+    if (!basicDetailsSalonId) { return undefined; }
+    let active = true;
+    persist({onboardingStatusLoading: true, onboardingStatusError: null});
+    onboardingService.getOnboardingStatus(basicDetailsSalonId).then(response => {
+      // No backend status contract is available. Retain the original response
+      // without inferring completion flags or changing the existing KYC flow.
+      if (active) { persist({onboardingStatusResponse: response, onboardingStatusLoading: false}); }
+    }).catch(error => {
+      if (active) { persist({onboardingStatusError: error.message, onboardingStatusLoading: false}); }
+    });
+    return () => { active = false; };
+  }, [basicDetailsSalonId, persist, viewingSubmission]);
+
+  useEffect(() => {
+    if (!basicDetailsSalonId || basicDetails) { return undefined; }
+    let active = true;
+    const loadSavedBasicDetails = async () => {
+      try {
+        const response = await onboardingService.getBasicDetails(basicDetailsSalonId);
+        const values = readBasicDetails(response, basicDetailsSalonId);
+        if (!values) { return; }
+        if (!active) { return; }
+        setBasicDetails(values);
+        setBasicComplete(true);
+        persist({basicDetails: values, basicComplete: true});
+      } catch {
+        // The individual Basic Details screen shows the existing retry alert.
+      }
+    };
+    loadSavedBasicDetails();
+    return () => { active = false; };
+  }, [basicDetails, basicDetailsSalonId, persist]);
 
   const openOnboardingStep = step => {
     if (step === 1) {
@@ -133,7 +222,14 @@ function SalonOnboardingScreen({salon, onBack}) {
   if (showFilesMedia) {
     return (
       <FilesMediaScreen
+        salonId={basicDetails?.salonId || salon.saloon_id || salon.salon_id}
         initialPhotos={salonPhotos}
+        onImagesChanged={photos => {
+          const complete = photos.length > 0 && photos.every(photo => photo.uploaded);
+          setSalonPhotos(photos);
+          setFilesComplete(complete);
+          persist({salonPhotos: photos, filesComplete: complete});
+        }}
         onBack={() => setShowFilesMedia(false)}
         onSave={photos => {
           setSalonPhotos(photos);
@@ -146,23 +242,23 @@ function SalonOnboardingScreen({salon, onBack}) {
   }
 
   if (showAddress) {
-    return <AddressScreen initialValues={addressDetails} onBack={() => setShowAddress(false)} onSave={values => { setAddressDetails(values); setAddressComplete(true); persist({addressDetails: values, addressComplete: true}); setShowAddress(false); }} />;
+    return <AddressScreen salonId={basicDetails?.salonId || salon.saloon_id || salon.salon_id} initialValues={addressDetails} onAddressVerified={complete => { setAddressComplete(complete); persist({addressComplete: complete}); }} onBack={() => setShowAddress(false)} onSave={values => { setAddressDetails(values); setAddressComplete(true); persist({addressDetails: values, addressComplete: true}); setShowAddress(false); }} />;
   }
 
   if (showServices) {
-    return <ServicesScreen salonType={basicDetails?.salonType || 'Unisex'} initialServices={salonServices} onBack={() => setShowServices(false)} onSave={values => { setSalonServices(values); setServicesComplete(true); persist({salonServices: values, servicesComplete: true}); setShowServices(false); }} />;
+    return <ServicesScreen salonId={basicDetails?.salonId || salon.saloon_id || salon.salon_id} salonType={basicDetails?.salonType || 'Unisex'} initialServices={salonServices} onBack={() => setShowServices(false)} onSave={values => { setSalonServices(values); setServicesComplete(true); persist({salonServices: values, servicesComplete: true}); setShowServices(false); }} />;
   }
 
   if (showEmployees) {
-    return <EmployeesScreen initialEmployees={salonEmployees} onBack={() => setShowEmployees(false)} onSaveContinue={values => { setSalonEmployees(values); setEmployeesComplete(true); persist({salonEmployees: values, employeesComplete: true}); setShowEmployees(false); }} />;
+    return <EmployeesScreen salonId={basicDetails?.salonId || salon.saloon_id || salon.salon_id} initialAddress={addressDetails} onAddressSaved={values => { setAddressDetails(values); setAddressComplete(true); persist({addressDetails: values, addressComplete: true}); }} initialEmployees={salonEmployees} onBack={() => setShowEmployees(false)} onSaveContinue={values => { setSalonEmployees(values); setEmployeesComplete(true); persist({salonEmployees: values, employeesComplete: true}); setShowEmployees(false); }} />;
   }
 
   if (showAvailability) {
-    return <SalonAvailabilityScreen initialDays={salonAvailability} onBack={() => setShowAvailability(false)} onSave={values => { setSalonAvailability(values); setAvailabilityComplete(true); persist({salonAvailability: values, availabilityComplete: true}); setShowAvailability(false); }} />;
+    return <SalonAvailabilityScreen salonId={basicDetails?.salonId || salon.saloon_id || salon.salon_id} initialDays={salonAvailability} onBack={() => setShowAvailability(false)} onSave={values => { setSalonAvailability(values); setAvailabilityComplete(true); persist({salonAvailability: values, availabilityComplete: true}); setShowAvailability(false); }} />;
   }
 
   if (showEmployeeAvailability) {
-    return <EmployeeAvailabilityScreen employees={salonEmployees} salonDays={salonAvailability} initialDays={employeeAvailability?.days} onBack={() => setShowEmployeeAvailability(false)} onSave={values => { setEmployeeAvailability(values); setEmployeeAvailabilityComplete(true); persist({employeeAvailability: values, employeeAvailabilityComplete: true}); setShowEmployeeAvailability(false); }} />;
+    return <EmployeeAvailabilityScreen salonId={basicDetails?.salonId || salon.saloon_id || salon.salon_id} employees={salonEmployees} salonDays={salonAvailability} initialDays={employeeAvailability?.days} onBack={() => setShowEmployeeAvailability(false)} onSave={values => { setEmployeeAvailability(values); setEmployeeAvailabilityComplete(true); persist({employeeAvailability: values, employeeAvailabilityComplete: true}); setShowEmployeeAvailability(false); }} />;
   }
 
   if (showKyc) {
@@ -174,6 +270,28 @@ function SalonOnboardingScreen({salon, onBack}) {
   }
 
   const activeStep = kycComplete ? 8 : employeeAvailabilityComplete ? 8 : availabilityComplete ? 7 : employeesComplete ? 6 : servicesComplete ? 5 : addressComplete ? 4 : filesComplete ? 3 : basicComplete ? 2 : 1;
+  const continueOnboarding = () => {
+    if (kycComplete) {
+      if (onOnboardingComplete) { onOnboardingComplete(); }
+      else { setSubmissionStatus(kycDetails?.reviewStatus || 'submitted'); }
+    } else if (!basicComplete) { setShowBasicDetails(true); }
+    else if (!filesComplete) { setShowFilesMedia(true); }
+    else if (!addressComplete) { setShowAddress(true); }
+    else if (!servicesComplete) { setShowServices(true); }
+    else if (!employeesComplete) { setShowEmployees(true); }
+    else if (!availabilityComplete) { setShowAvailability(true); }
+    else if (!employeeAvailabilityComplete) { setShowEmployeeAvailability(true); }
+    else { setShowKyc(true); }
+  };
+  const continueLabel = kycComplete ? 'Submit Onboarding'
+    : !basicComplete ? 'Start Basic Details'
+      : !filesComplete ? 'Continue Files & Media'
+        : !addressComplete ? 'Continue Address'
+          : !servicesComplete ? 'Continue Services'
+            : !employeesComplete ? 'Continue Employees'
+              : !availabilityComplete ? 'Continue Salon Availability'
+                : !employeeAvailabilityComplete ? 'Continue Employee Availability'
+                  : 'Continue KYC';
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -187,8 +305,8 @@ function SalonOnboardingScreen({salon, onBack}) {
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.salonCard}>
           <View style={styles.shopTile}><Image source={shopIcon} resizeMode="contain" style={styles.shopImage} /></View>
-          <View style={styles.salonCopy}><Text style={styles.salonName}>{salon.name}</Text><Text style={styles.salonType}>Unisex Salon</Text><View style={styles.salonLocationRow}><Ionicons name="location-outline" size={11} color="#69718A" /><Text style={styles.salonLocation}>{salon.location}</Text></View></View>
-          <Text style={styles.leadId}>{salon.leadId}</Text>
+          <View style={styles.salonCopy}><Text numberOfLines={1} adjustsFontSizeToFit style={styles.salonName}>{salon.name}</Text><Text style={styles.salonType}>Unisex Salon</Text><View style={styles.salonLocationRow}><Ionicons name="location-outline" size={11} color="#69718A" /><Text numberOfLines={1} adjustsFontSizeToFit style={styles.salonLocation}>{salon.location?.replace(/\s+/g, ' ').trim()}</Text></View></View>
+          <Text numberOfLines={1} adjustsFontSizeToFit style={styles.leadId}>{salon.leadId}</Text>
         </View>
 
         <View style={styles.progressCard}>
@@ -198,7 +316,7 @@ function SalonOnboardingScreen({salon, onBack}) {
       </ScrollView>
 
       <View style={styles.footer}>
-        <Pressable onPress={() => kycComplete ? setSubmissionStatus(kycDetails?.reviewStatus || 'submitted') : !basicComplete ? setShowBasicDetails(true) : !filesComplete ? setShowFilesMedia(true) : !addressComplete ? setShowAddress(true) : setShowServices(true)} style={({pressed}) => [styles.continueButton, pressed && styles.pressed]}><Text style={styles.continueText}>{kycComplete ? 'Submit Onboarding' : !basicComplete ? 'Start Basic Details' : !filesComplete ? 'Continue Files & Media' : !addressComplete ? 'Continue Address' : 'Continue Services'}</Text><Ionicons name="chevron-forward" size={17} color="#FFFFFF" /></Pressable>
+        <Pressable onPress={continueOnboarding} style={({pressed}) => [styles.continueButton, pressed && styles.pressed]}><Text style={styles.continueText}>{continueLabel}</Text><Ionicons name="chevron-forward" size={17} color="#FFFFFF" /></Pressable>
       </View>
     </SafeAreaView>
   );
@@ -216,12 +334,12 @@ const styles = StyleSheet.create({
   salonCard: {minHeight: 86, borderRadius: 12, borderWidth: 1, borderColor: '#E4E7F0', backgroundColor: '#FFFFFF', padding: 11, flexDirection: 'row', alignItems: 'center'},
   shopTile: {width: 58, height: 58, borderRadius: 10, backgroundColor: '#F1EEFF', alignItems: 'center', justifyContent: 'center'},
   shopImage: {width: 38, height: 38, tintColor: '#5637EF'},
-  salonCopy: {flex: 1, marginLeft: 12},
+  salonCopy: {flex: 1, marginLeft: 12, marginRight: 126},
   salonName: {color: '#111735', fontSize: 15, fontFamily: 'Poppins_600SemiBold'},
   salonType: {color: '#626982', fontSize: 9, marginTop: 3},
   salonLocationRow: {flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 5},
-  salonLocation: {color: '#626982', fontSize: 9, fontFamily: 'Inter_400Regular'},
-  leadId: {alignSelf: 'flex-start', color: '#9A9EB0', fontSize: 7.5},
+  salonLocation: {flexShrink: 1, color: '#626982', fontSize: 10, fontFamily: 'Inter_400Regular', fontWeight: '300'},
+  leadId: {position: 'absolute', top: 11, right: 11, width: 120, color: '#9A9EB0', fontSize: 7.5, textAlign: 'right'},
   progressCard: {marginTop: 12, borderRadius: 12, borderWidth: 1, borderColor: '#E4E7F0', backgroundColor: '#FFFFFF', padding: 13},
   progressHeader: {flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between'},
   progressTitle: {color: '#111735', fontSize: 15, fontWeight: '600'},

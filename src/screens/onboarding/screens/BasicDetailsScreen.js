@@ -1,5 +1,6 @@
-import React, {useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
+  Alert,
   Image,
   KeyboardAvoidingView,
   Platform,
@@ -12,6 +13,9 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import * as Keychain from 'react-native-keychain';
+import {onboardingService} from '../../../services/apiService.js';
+import {extractSavedSalonId} from '../onboardingTasks.js';
 
 const shopIcon = require('../../../assets/icons/detail-shop.png');
 const phoneIcon = require('../../../assets/icons/detail-phone.png');
@@ -20,6 +24,70 @@ const gstDocumentIcon = require('../../../assets/icons/onboarding-gst-document.p
 const unisexIcon = require('../../../assets/icons/onboarding-unisex.png');
 
 const SALON_TYPES = ['Men', 'Women', 'Unisex'];
+// Format check only; the backend remains responsible for accepting the GSTIN.
+const GSTIN_PATTERN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+const BASIC_DETAILS_CACHE_PREFIX = 'com.snipsor.field.onboarding.basic-details.';
+// Keep the complete record while users move between onboarding steps. Some
+// Basic Details GET responses intentionally contain only salon name/type.
+const basicDetailsMemoryCache = new Map();
+const asBoolean = value => value === true || value === 1 || ['true', '1', 'yes'].includes(String(value).trim().toLowerCase());
+
+const cacheOptions = salonId => ({service: `${BASIC_DETAILS_CACHE_PREFIX}${encodeURIComponent(String(salonId))}`});
+
+const readCachedBasicDetails = async salonId => {
+  const memoryValues = basicDetailsMemoryCache.get(String(salonId));
+  try {
+    const credentials = await Keychain.getGenericPassword(cacheOptions(salonId));
+    if (!credentials?.password) { return memoryValues || null; }
+    const values = JSON.parse(credentials.password);
+    return values && typeof values === 'object' && !Array.isArray(values)
+      ? {...memoryValues, ...values}
+      : memoryValues || null;
+  } catch {
+    return memoryValues || null;
+  }
+};
+
+const cacheBasicDetails = async (salonId, values) => {
+  basicDetailsMemoryCache.set(String(salonId), values);
+  try {
+    await Keychain.setGenericPassword('basic-details', JSON.stringify(values), cacheOptions(salonId));
+  } catch {
+    // The server save remains the source of truth; this only covers API reads
+    // that omit mobile/GST after a later app launch.
+  }
+};
+
+const detailSources = (record, container) => [
+  record, container,
+  record?.contact_details, record?.contactDetails, record?.salon_contact, record?.salonContact,
+  record?.gst_details, record?.gstDetails,
+  container?.contact_details, container?.contactDetails, container?.salon_contact, container?.salonContact,
+  container?.gst_details, container?.gstDetails,
+].filter(value => value && typeof value === 'object' && !Array.isArray(value));
+
+const firstValue = (sources, keys, fallback) => {
+  for (const source of sources) {
+    for (const key of keys) {
+      if (source[key] !== undefined && source[key] !== null && source[key] !== '') { return source[key]; }
+    }
+  }
+  return fallback;
+};
+
+const readPhoneNumber = (record, container, fallback = '') => {
+  const value = firstValue(detailSources(record, container), ['mobile_number', 'mobileNumber', 'phone_number', 'phoneNumber', 'mobile', 'phone', 'mobile_no', 'phone_no', 'contact_number', 'contactNumber'], fallback);
+  const digits = String(value).replace(/\D/g, '');
+  return digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits.slice(-10);
+};
+
+const readGstDetails = (record, container, fallback = {}) => {
+  const sources = detailSources(record, container);
+  return {
+    registered: asBoolean(firstValue(sources, ['is_gst_registered', 'gst_registered', 'gstRegistered', 'gst_number_registered', 'is_gst_number_registered', 'registered', 'is_registered'], fallback.registered)),
+    number: String(firstValue(sources, ['gst_info', 'gst_number', 'gstNumber', 'gstin', 'gstin_number', 'gstinNo', 'gst_no'], fallback.number ?? '')),
+  };
+};
 
 function Toggle({value, onChange}) {
   return <Pressable accessibilityRole="switch" accessibilityState={{checked: value}} onPress={() => onChange(!value)} style={[styles.toggle, value && styles.toggleOn]}><View style={[styles.toggleThumb, value && styles.toggleThumbOn]} /></Pressable>;
@@ -38,6 +106,13 @@ function UnisexFieldIcon() {
 }
 
 function BasicDetailsScreen({salon, initialValues, onBack, onSave}) {
+  const [createdSalonId, setSavedSalonId] = useState(null);
+  const savedSalonId = createdSalonId || initialValues?.salonId || extractSavedSalonId(salon);
+  const [isBusy, setIsBusy] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const pending = useRef(false);
+  const mounted = useRef(true);
+  const createdWithoutId = useRef(false);
   const [salonName, setSalonName] = useState(initialValues?.salonName || '');
   const [mobileNumber, setMobileNumber] = useState(initialValues?.mobileNumber || '');
   const [salonType, setSalonType] = useState(initialValues?.salonType || '');
@@ -45,10 +120,94 @@ function BasicDetailsScreen({salon, initialValues, onBack, onSave}) {
   const [gstRegistered, setGstRegistered] = useState(initialValues?.gstRegistered || false);
   const [priceExclusive, setPriceExclusive] = useState(initialValues?.priceExclusive || false);
   const [gstNumber, setGstNumber] = useState(initialValues?.gstNumber || '');
-  const isValid = useMemo(() => salonName.trim().length > 1 && mobileNumber.length === 10 && Boolean(salonType) && (!gstRegistered || gstNumber.trim().length >= 15), [gstNumber, gstRegistered, mobileNumber, salonName, salonType]);
+  const isGstNumberValid = GSTIN_PATTERN.test(gstNumber.trim());
+  const isValid = useMemo(() => salonName.trim().length > 1 && mobileNumber.length === 10 && Boolean(salonType) && (!gstRegistered || isGstNumberValid), [isGstNumberValid, gstRegistered, mobileNumber, salonName, salonType]);
 
-  const save = () => {
-    if (isValid) onSave({salonName: salonName.trim(), mobileNumber, salonType, gstRegistered, priceExclusive, gstNumber: gstNumber.trim()});
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  useEffect(() => {
+    if (!savedSalonId) { return undefined; }
+    let active = true;
+    const load = async () => {
+      if (!active) { return; }
+      setIsBusy(true);
+      setLoadFailed(false);
+      try {
+        const [response, cachedValues] = await Promise.all([
+          onboardingService.getBasicDetails(savedSalonId),
+          readCachedBasicDetails(savedSalonId),
+        ]);
+        if (!response || response.success === false) { throw new Error(response?.message || 'Unable to load basic details.'); }
+        const container = response.data || response;
+        // The onboarding GET response returns the saved values under
+        // `data.salon_details`; retain the other supported response wrappers.
+        const record = container.salon_details || container.saloon_details || container.salon || container.saloon || container;
+        if (!record || typeof record !== 'object' || Array.isArray(record)) { throw new Error('Invalid basic details response.'); }
+        if (!active) { return; }
+        setSalonName(record.name ?? record.salon_name ?? record.salonName ?? initialValues?.salonName ?? '');
+        setMobileNumber(readPhoneNumber(record, container, cachedValues?.mobileNumber || initialValues?.mobileNumber));
+        const type = String(record.salon_type ?? record.salonType ?? initialValues?.salonType ?? '');
+        setSalonType(SALON_TYPES.find(value => value.toLowerCase() === type.toLowerCase()) || type);
+        const gst = readGstDetails(record, container, {
+          registered: cachedValues?.gstRegistered ?? initialValues?.gstRegistered,
+          number: cachedValues?.gstNumber || initialValues?.gstNumber,
+        });
+        setGstRegistered(gst.registered);
+        setPriceExclusive(typeof record.price_includes_tax === 'boolean' ? !record.price_includes_tax : (record.price_exclusive ?? record.priceExclusive ?? initialValues?.priceExclusive ?? false));
+        setGstNumber(gst.number);
+      } catch (error) {
+        if (!active) { return; }
+        setLoadFailed(true);
+        Alert.alert('Unable to load basic details', error?.message || 'Please try again.', [{text: 'Cancel', style: 'cancel'}, {text: 'Retry', onPress: load}]);
+      } finally {
+        if (active) { setIsBusy(false); }
+      }
+    };
+    load();
+    return () => { active = false; };
+  }, [savedSalonId, initialValues]);
+
+  const save = async () => {
+    if (!isValid || isBusy || loadFailed || pending.current || createdWithoutId.current) { return; }
+    const leadId = salon?.leadId || salon?.lead_id || salon?.id;
+    if (!savedSalonId && !leadId) {
+      Alert.alert('Unable to save basic details', 'The selected lead does not have a valid ID.');
+      return;
+    }
+    pending.current = true;
+    setIsBusy(true);
+    const values = {salonName: salonName.trim(), mobileNumber, salonType, gstRegistered, priceExclusive, gstNumber: gstNumber.trim()};
+    const payload = {
+      name: values.salonName, phone_number: mobileNumber, mobile_number: mobileNumber, phone: mobileNumber, mobile: mobileNumber, salon_type: salonType,
+      is_gst_registered: gstRegistered, gst_registered: gstRegistered, is_gst_number_registered: gstRegistered, price_includes_tax: !(gstRegistered && priceExclusive),
+      gst_info: gstRegistered ? values.gstNumber : null, gst_number: gstRegistered ? values.gstNumber : null, gstin: gstRegistered ? values.gstNumber : null, gstin_number: gstRegistered ? values.gstNumber : null,
+      ...(!savedSalonId ? {lead_id: leadId} : {}),
+    };
+    try {
+      const response = savedSalonId
+        ? await onboardingService.updateBasicDetails(savedSalonId, payload)
+        : await onboardingService.createBasicDetails(payload);
+      if (!response || response.success === false) { throw new Error(response?.message || 'The server did not confirm the save.'); }
+      const container = response.data || response;
+      const record = container.salon_details || container.saloon_details || container.salon || container.saloon || container;
+      const id = record.saloon_id || record.saloonId || record.salon_id || record.salonId || record.id || savedSalonId;
+      if (!id) {
+        createdWithoutId.current = true;
+        throw new Error('The server accepted the request but returned no salon ID. Reopen the lead before saving again.');
+      }
+      if (mounted.current) {
+        await cacheBasicDetails(id, values);
+        setSavedSalonId(id);
+        onSave({...values, salonId: String(id)});
+      }
+    } catch (error) {
+      if (mounted.current) { Alert.alert('Unable to save basic details', error?.message || 'Please try again.'); }
+    } finally {
+      pending.current = false;
+      if (mounted.current) { setIsBusy(false); }
+    }
   };
 
   return (
@@ -56,13 +215,13 @@ function BasicDetailsScreen({salon, initialValues, onBack, onSave}) {
       <StatusBar barStyle="light-content" backgroundColor="#07113D" />
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.screen}>
         <View style={styles.header}>
-          <Pressable accessibilityLabel="Back" hitSlop={12} onPress={onBack} style={styles.backButton}><Text style={styles.backArrow}>←</Text></Pressable>
+          <Pressable disabled={isBusy} accessibilityLabel="Back" hitSlop={12} onPress={onBack} style={styles.backButton}><Text style={styles.backArrow}>←</Text></Pressable>
           <Text style={styles.headerTitle}>Basic Details</Text>
         </View>
         <View style={styles.progressArea}><Text style={styles.stepText}>Step 1 of 8</Text><View style={styles.progressImageWrap}><View style={styles.progressFill}><View style={styles.progressHighlight} /></View></View></View>
 
         <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-          <View style={styles.formCard}>
+          <View pointerEvents={isBusy ? 'none' : 'auto'} style={styles.formCard}>
             <Text style={styles.formTitle}>Tell us about the salon</Text>
 
             <Text style={styles.label}>Salon Name <Text style={styles.required}>*</Text></Text>
@@ -81,13 +240,13 @@ function BasicDetailsScreen({salon, initialValues, onBack, onSave}) {
             {gstRegistered && <View style={styles.gstPanel}>
               <View style={styles.toggleRow}><View style={styles.priceCopy}><View style={styles.priceTitleRow}><Text style={styles.gstTitle}>•  Price exclusive of tax</Text>{priceExclusive && <View style={styles.recommendedPill}><Text style={styles.recommendedText}>Recommended</Text></View>}</View><Text style={styles.gstHelper}>All displayed prices will be shown excluding GST.</Text></View><Toggle value={priceExclusive} onChange={setPriceExclusive} /></View>
               <View style={styles.divider} />
-              <Text style={styles.gstTitle}>•  GST Number <Text style={styles.required}>*</Text></Text><Text style={styles.gstHelper}>Enter your 15-digit GST number.</Text>
-              <View style={styles.inputBox}><FieldIcon source={gstDocumentIcon} large /><TextInput autoCapitalize="characters" value={gstNumber} onChangeText={value => setGstNumber(value.replace(/\s/g, '').slice(0, 15).toUpperCase())} placeholder="GSTIN" placeholderTextColor="#9A9FB2" style={styles.input} />{gstNumber.length === 15 && <View style={styles.validCircle}><View style={styles.validTick} /></View>}</View>
+              <Text style={styles.gstTitle}>•  GST Number <Text style={styles.required}>*</Text></Text><Text style={styles.gstHelper}>Enter your 15-character GSTIN (letters and numbers).</Text>
+              <View style={styles.inputBox}><FieldIcon source={gstDocumentIcon} large /><TextInput autoCapitalize="characters" value={gstNumber} onChangeText={value => setGstNumber(value.replace(/\s/g, '').slice(0, 15).toUpperCase())} placeholder="GSTIN" placeholderTextColor="#9A9FB2" style={styles.input} />{isGstNumberValid && <View style={styles.validCircle}><View style={styles.validTick} /></View>}</View>
             </View>}
           </View>
         </ScrollView>
 
-        <View style={styles.footer}><Pressable onPress={onBack} style={styles.cancelButton}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable disabled={!isValid} onPress={save} style={[styles.saveButton, !isValid && styles.saveButtonDisabled]}><Text style={[styles.saveText, !isValid && styles.saveTextDisabled]}>Save & Continue</Text></Pressable></View>
+        <View style={styles.footer}><Pressable disabled={isBusy} onPress={onBack} style={styles.cancelButton}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable disabled={!isValid || isBusy || loadFailed} onPress={save} style={[styles.saveButton, (!isValid || isBusy || loadFailed) && styles.saveButtonDisabled]}><Text style={[styles.saveText, (!isValid || isBusy || loadFailed) && styles.saveTextDisabled]}>{isBusy ? 'Please wait...' : 'Save & Continue'}</Text></Pressable></View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );

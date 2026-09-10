@@ -1,6 +1,7 @@
-import React, {useMemo, useState} from 'react';
-import {Image, Modal, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
+import React, {useEffect, useMemo, useState} from 'react';
+import {Alert, Image, Modal, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
+import {onboardingService} from '../../../services/apiService';
 
 const salonTypeIcon = require('../../../assets/icons/onboarding-unisex.png');
 const emptyServicesIcon = require('../../../assets/icons/services-empty-state.png');
@@ -8,23 +9,109 @@ const serviceIcon = require('../../../assets/icons/detail-contact.png');
 const menIcon = require('../../../assets/icons/services-gender-men.png');
 const womenIcon = require('../../../assets/icons/services-gender-women.png');
 const durationIcon = require('../../../assets/icons/services-duration.png');
-const CATALOG = ['Haircut', 'Hair Wash', 'Hair Spa', 'Beard Trim', 'Layer Cut'];
 const DURATIONS = [20, 30, 45, 60];
 
-function ServicesScreen({salonType = 'Unisex', initialServices = [], onBack, onSave}) {
+export const readServices = response => {
+  const data = response?.data ?? response;
+  const records = Array.isArray(data) ? data : data?.services || data?.salon_services || data?.saloon_services || [];
+  if (!Array.isArray(records)) { throw new Error('The server returned an invalid services response.'); }
+  return records.map(record => ({
+    id: String(record.saloon_service_id || record.salon_service_id || record.service_id || record.id || ''),
+    catalogId: record.global_service_id || record.catalog_service_id || record.service_catalog_id || record.service_id || record.id,
+    name: String(record.service_name || record.name || record.service?.name || ''),
+    gender: String(record.gender || record.service_gender || record.category || '').replace(/^male$/i, 'Men').replace(/^female$/i, 'Women') || 'Men',
+    price: String(record.price ?? record.service_price ?? record.amount ?? ''),
+    duration: Number(record.duration ?? record.duration_minutes ?? record.duration_mins ?? 30) || 30,
+  })).filter(service => service.id && service.name);
+};
+
+export const servicePayload = ({service, price, duration}) => ({
+  service_name: service.name,
+  price: Number(price),
+  duration_minutes: Number(duration),
+  ...(service.catalogId && {global_service_id: service.catalogId}),
+});
+
+export const readGlobalServices = response => {
+  if (!response || response.success === false) {
+    throw new Error(response?.message || 'Unable to load the global service catalog.');
+  }
+  const data = response.data ?? response;
+  const records = Array.isArray(data) ? data : data?.services;
+  if (!Array.isArray(records)) {
+    throw new Error('The server returned an invalid global service catalog.');
+  }
+  return readServices(records.map(record => ({...record, service_id: record.service_id || record.global_service_id || record.id})));
+};
+
+function ServicesScreen({salonId, salonType = 'Unisex', initialServices = [], onBack, onSave}) {
   const [services, setServices] = useState(initialServices);
+  const [catalog, setCatalog] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [gender, setGender] = useState(salonType === 'Women' ? 'Women' : 'Men');
   const [search, setSearch] = useState('');
-  const [selectedName, setSelectedName] = useState('');
+  const [selectedService, setSelectedService] = useState(null);
   const [price, setPrice] = useState('300');
   const [duration, setDuration] = useState(30);
   const [durationOpen, setDurationOpen] = useState(false);
   const isUnisex = salonType === 'Unisex';
-  const filteredCatalog = useMemo(() => CATALOG.filter(name => name.toLowerCase().includes(search.toLowerCase())), [search]);
+  const filteredCatalog = useMemo(() => catalog.filter(service => service.name.toLowerCase().includes(search.toLowerCase())), [catalog, search]);
 
-  const openCatalog = () => { setSearch(''); setSelectedName(''); setPrice('300'); setDuration(30); setDurationOpen(false); setGender(salonType === 'Women' ? 'Women' : 'Men'); setModalOpen(true); };
-  const saveService = () => { if (!selectedName || !price) return; setServices(current => [...current, {id: `${Date.now()}`, name: selectedName, gender, price, duration}]); setModalOpen(false); };
+  const loadServices = async () => {
+    const values = readServices(await onboardingService.getServices(salonId));
+    setServices(values);
+    return values;
+  };
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      setLoading(true);
+      try {
+        const values = readServices(await onboardingService.getServices(salonId));
+        if (active) { setServices(values); }
+      } catch (error) {
+        if (active) { Alert.alert('Unable to load services', error?.message || 'Please try again.'); }
+      } finally {
+        if (active) { setLoading(false); }
+      }
+    };
+    load();
+    return () => { active = false; };
+  }, [salonId]);
+  useEffect(() => {
+    if (!modalOpen) { return undefined; }
+    let active = true;
+    const loadCatalog = async () => {
+      try {
+        const values = readGlobalServices(await onboardingService.getGlobalServices());
+        if (active) { setCatalog(values); }
+      } catch (error) {
+        if (active) {
+          Alert.alert('Unable to load services', error?.message || 'Please try again.', [
+            {text: 'Cancel', style: 'cancel'}, {text: 'Retry', onPress: loadCatalog},
+          ]);
+        }
+      }
+    };
+    loadCatalog();
+    return () => { active = false; };
+  }, [modalOpen]);
+  const openCatalog = () => { setSearch(''); setSelectedService(null); setPrice('300'); setDuration(30); setDurationOpen(false); setGender(salonType === 'Women' ? 'Women' : 'Men'); setModalOpen(true); };
+  const saveService = async () => {
+    if (!selectedService || !price || saving) return;
+    setSaving(true);
+    try {
+      await onboardingService.createService(salonId, servicePayload({service: selectedService, price, duration}));
+      await loadServices();
+      setModalOpen(false);
+    } catch (error) {
+      Alert.alert('Unable to save service', error?.message || 'Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
   const renderGroup = group => {
     const items = services.filter(service => service.gender === group);
     if (!items.length) return null;
@@ -38,17 +125,17 @@ function ServicesScreen({salonType = 'Unisex', initialServices = [], onBack, onS
     {services.length === 0 ? <View style={styles.card}>
       <Text style={styles.title}>Add services offered by the salon</Text><Text style={styles.subtitle}>Add services from Snipsor’s global catalog.</Text>
       <View style={styles.salonTypeChip}><Image source={salonTypeIcon} resizeMode="contain" style={styles.salonTypeIcon} /><Text style={styles.salonTypeText}>Salon type: {salonType}</Text></View>
-      <Pressable onPress={openCatalog} style={styles.addButton}><Text style={styles.plus}>＋</Text><Text style={styles.addButtonText}>Add services</Text></Pressable>
+      <Pressable disabled={loading} onPress={openCatalog} style={styles.addButton}><Text style={styles.plus}>＋</Text><Text style={styles.addButtonText}>Add services</Text></Pressable>
       <View style={styles.emptyState}><Image source={emptyServicesIcon} resizeMode="contain" style={styles.emptyIcon} /><Text style={styles.emptyTitle}>No services added yet</Text><Text style={styles.emptyText}>Tap add services to choose{`\n`}services for {isUnisex ? 'men and women' : salonType.toLowerCase()}.</Text></View>
       {isUnisex && <View style={styles.infoBox}><Text style={styles.infoIcon}>ⓘ</Text><Text style={styles.infoText}>Men and Women services will be managed separately for unisex salons.</Text></View>}
     </View> : <ScrollView contentContainerStyle={styles.summaryCard} showsVerticalScrollIndicator={false}><Text style={styles.summaryTitle}>Services added</Text>{renderGroup('Men')}{renderGroup('Women')}<Pressable onPress={openCatalog} style={styles.addMoreButton}><Text style={styles.plus}>＋</Text><Text style={styles.addButtonText}>Add more services</Text></Pressable></ScrollView>}
     <View style={styles.footer}><Pressable onPress={onBack} style={styles.cancelButton}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable disabled={!services.length} onPress={() => onSave(services)} style={[styles.saveButton, !services.length && styles.saveDisabled]}><Text style={[styles.saveText, !services.length && styles.saveDisabledText]}>Save &amp; Continue</Text></Pressable></View>
 
     <Modal animationType="slide" transparent visible={modalOpen} onRequestClose={() => setModalOpen(false)}><View style={styles.modalShade}><View style={styles.sheet}><View style={styles.handle} /><View style={styles.sheetHeader}><Text style={styles.sheetTitle}>Add service</Text><Pressable accessibilityRole="button" accessibilityLabel="Close add service" hitSlop={10} onPress={() => setModalOpen(false)} style={styles.closeButton}><Text style={styles.close}>×</Text></Pressable></View><View style={styles.sheetChip}><Image source={salonTypeIcon} resizeMode="contain" style={styles.salonTypeIcon} /><Text style={styles.salonTypeText}>Salon type: {salonType}</Text></View>
-      {isUnisex && <View style={styles.genderTabs}>{['Men', 'Women'].map(option => <Pressable key={option} onPress={() => {setGender(option); setSelectedName('');}} style={[styles.genderTab, gender === option && styles.genderActive]}><Image source={option === 'Men' ? menIcon : womenIcon} resizeMode="contain" style={[styles.genderIcon, gender === option && styles.genderIconActive]} /><Text style={[styles.genderText, gender === option && styles.genderTextActive]}>{option}</Text></Pressable>)}</View>}
+      {isUnisex && <View style={styles.genderTabs}>{['Men', 'Women'].map(option => <Pressable key={option} onPress={() => {setGender(option); setSelectedService(null);}} style={[styles.genderTab, gender === option && styles.genderActive]}><Image source={option === 'Men' ? menIcon : womenIcon} resizeMode="contain" style={[styles.genderIcon, gender === option && styles.genderIconActive]} /><Text style={[styles.genderText, gender === option && styles.genderTextActive]}>{option}</Text></Pressable>)}</View>}
       <View style={styles.searchBox}><View style={styles.searchIcon} accessibilityElementsHidden><View style={styles.searchLens}><View style={styles.searchHandle} /></View></View><TextInput value={search} onChangeText={setSearch} placeholder="Search services" placeholderTextColor="#9AA2B5" style={styles.searchInput} /><Pressable accessibilityRole="button" accessibilityLabel="Clear search" hitSlop={8} onPress={() => setSearch('')} style={styles.clearButton}><Text style={styles.clear}>×</Text></Pressable></View>
-      {!selectedName ? <ScrollView style={styles.catalog} contentContainerStyle={styles.catalogContent} showsVerticalScrollIndicator={false}>{filteredCatalog.map((name, index) => <Pressable key={name} onPress={() => {setSelectedName(name); setDurationOpen(false);}} style={[styles.catalogRow, index === filteredCatalog.length - 1 && styles.catalogRowLast]}><View style={styles.catalogImage}><Image source={serviceIcon} resizeMode="contain" style={styles.catalogIcon} /></View><View style={styles.catalogCopy}><Text style={styles.catalogName}>{name}</Text><Text style={styles.catalogGender}>{gender}</Text></View><Text style={styles.chevron}>›</Text></Pressable>)}</ScrollView> : <View style={styles.detailArea}><View style={styles.selectedCard}><View style={styles.catalogImage}><Image source={serviceIcon} resizeMode="contain" style={styles.catalogIcon} /></View><View style={styles.catalogCopy}><Text style={styles.catalogName}>{selectedName}</Text><Text style={styles.catalogGender}>{gender}</Text></View></View><Text style={styles.fieldLabel}>Service Name</Text><View style={styles.readonlyField}><Text style={styles.readonlyText}>{selectedName}</Text></View><View style={styles.detailRow}><View style={styles.detailField}><Text style={styles.fieldLabel}>Price (₹)</Text><TextInput keyboardType="number-pad" value={price} onFocus={() => setDurationOpen(false)} onChangeText={value => setPrice(value.replace(/\D/g, '').slice(0, 6))} style={styles.editField} /></View><View style={[styles.detailField, styles.durationWrap]}><Text style={styles.fieldLabel}>Duration (min)</Text><Pressable accessibilityRole="button" accessibilityLabel="Choose service duration" accessibilityState={{expanded: durationOpen}} onPress={() => setDurationOpen(current => !current)} style={[styles.durationField, durationOpen && styles.durationFieldOpen]}><Text style={styles.readonlyText}>{duration} min</Text><View style={[styles.dropdownChevron, durationOpen && styles.dropdownChevronOpen]} /></Pressable>{durationOpen && <View style={styles.durationMenu}>{DURATIONS.map(option => <Pressable key={option} accessibilityRole="button" onPress={() => {setDuration(option); setDurationOpen(false);}} style={[styles.durationOption, option === duration && styles.durationOptionSelected, option === DURATIONS[DURATIONS.length - 1] && styles.durationOptionLast]}><Text style={[styles.durationOptionText, option === duration && styles.durationOptionTextSelected]}>{option} min</Text>{option === duration && <Text style={styles.durationCheck}>✓</Text>}</Pressable>)}</View>}</View></View><View style={styles.lockBox}><View style={styles.lockIcon}><View style={styles.lockShackle} /><View style={styles.lockBody}><View style={styles.lockKeyhole} /></View></View><Text style={styles.lockText}>Image comes from global catalog{`\n`}and cannot be changed.</Text></View></View>}
-      <View style={styles.sheetFooter}><Pressable onPress={() => setModalOpen(false)} style={styles.cancelButton}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable disabled={!selectedName || !price} onPress={saveService} style={[styles.saveButton, (!selectedName || !price) && styles.saveDisabled]}><Text style={[styles.saveText, (!selectedName || !price) && styles.saveDisabledText]}>Save</Text></Pressable></View>
+      {!selectedService ? <ScrollView style={styles.catalog} contentContainerStyle={styles.catalogContent} showsVerticalScrollIndicator={false}>{filteredCatalog.map((service, index) => <Pressable key={service.id} onPress={() => {setSelectedService(service); setDurationOpen(false);}} style={[styles.catalogRow, index === filteredCatalog.length - 1 && styles.catalogRowLast]}><View style={styles.catalogImage}><Image source={serviceIcon} resizeMode="contain" style={styles.catalogIcon} /></View><View style={styles.catalogCopy}><Text style={styles.catalogName}>{service.name}</Text><Text style={styles.catalogGender}>{gender}</Text></View><Text style={styles.chevron}>›</Text></Pressable>)}</ScrollView> : <View style={styles.detailArea}><View style={styles.selectedCard}><View style={styles.catalogImage}><Image source={serviceIcon} resizeMode="contain" style={styles.catalogIcon} /></View><View style={styles.catalogCopy}><Text style={styles.catalogName}>{selectedService.name}</Text><Text style={styles.catalogGender}>{gender}</Text></View></View><Text style={styles.fieldLabel}>Service Name</Text><View style={styles.readonlyField}><Text style={styles.readonlyText}>{selectedService.name}</Text></View><View style={styles.detailRow}><View style={styles.detailField}><Text style={styles.fieldLabel}>Price (₹)</Text><TextInput keyboardType="number-pad" value={price} onFocus={() => setDurationOpen(false)} onChangeText={value => setPrice(value.replace(/\D/g, '').slice(0, 6))} style={styles.editField} /></View><View style={[styles.detailField, styles.durationWrap]}><Text style={styles.fieldLabel}>Duration (min)</Text><Pressable accessibilityRole="button" accessibilityLabel="Choose service duration" accessibilityState={{expanded: durationOpen}} onPress={() => setDurationOpen(current => !current)} style={[styles.durationField, durationOpen && styles.durationFieldOpen]}><Text style={styles.readonlyText}>{duration} min</Text><View style={[styles.dropdownChevron, durationOpen && styles.dropdownChevronOpen]} /></Pressable>{durationOpen && <View style={styles.durationMenu}>{DURATIONS.map(option => <Pressable key={option} accessibilityRole="button" onPress={() => {setDuration(option); setDurationOpen(false);}} style={[styles.durationOption, option === duration && styles.durationOptionSelected, option === DURATIONS[DURATIONS.length - 1] && styles.durationOptionLast]}><Text style={[styles.durationOptionText, option === duration && styles.durationOptionTextSelected]}>{option} min</Text>{option === duration && <Text style={styles.durationCheck}>✓</Text>}</Pressable>)}</View>}</View></View><View style={styles.lockBox}><View style={styles.lockIcon}><View style={styles.lockShackle} /><View style={styles.lockBody}><View style={styles.lockKeyhole} /></View></View><Text style={styles.lockText}>Image comes from global catalog{`\n`}and cannot be changed.</Text></View></View>}
+      <View style={styles.sheetFooter}><Pressable onPress={() => setModalOpen(false)} style={styles.cancelButton}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable disabled={!selectedService || !price || saving} onPress={saveService} style={[styles.saveButton, (!selectedService || !price || saving) && styles.saveDisabled]}><Text style={[styles.saveText, (!selectedService || !price || saving) && styles.saveDisabledText]}>Save</Text></Pressable></View>
     </View></View></Modal>
   </SafeAreaView>;
 }
