@@ -6,6 +6,7 @@ buildscript {
         targetSdkVersion = 36
        ndkVersion = "27.2.12479018"
         kotlinVersion = "2.2.0"
+        VisionCamera_enableCodeScanner = true
     }
     repositories {
         google()
