@@ -7,7 +7,7 @@ const splashArtwork = require('../../assets/images/relative/splash-screen-v3.png
 function SplashScreen() {
   return (
     <View style={styles.screen}>
-      <StatusBar hidden />
+      <StatusBar backgroundColor="transparent" hidden translucent />
       <Image
         fadeDuration={0}
         resizeMethod="resize"

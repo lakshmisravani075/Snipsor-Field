@@ -1,25 +1,105 @@
-import React, {useState} from 'react';
-import {Image, KeyboardAvoidingView, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
+import React, {useEffect, useState} from 'react';
+import {Ionicons} from '@react-native-vector-icons/ionicons/static';
+import {Alert, Image, KeyboardAvoidingView, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
+import {onboardingService} from '../../../services/apiService';
+import AddressScreen from './AddressScreen';
 const emptyIcon = require('../../../assets/icons/employees-empty-state.png');
 const ROLES = ['Owner', 'Employee'];
 const GENDERS = ['Male', 'Female'];
 const Chevron = ({open}) => <View style={[s.chevron, open && s.chevronOpen]} />;
 
-function EmployeesScreen({initialEmployees = [], onBack, onSaveContinue}) {
+export const readEmployees = response => {
+  const data = response?.data ?? response;
+  const records = Array.isArray(data) ? data : data?.employees || data?.data || [];
+  if (!Array.isArray(records)) { throw new Error('The server returned an invalid employees response.'); }
+  return records.map(record => ({
+    id: String(record.saloon_member_id || record.salon_member_id || record.employee_id || record.id || record.member_id || record.phone_number || ''),
+    phone: String(record.phone_number || record.phone || record.mobile_number || record.mobile || ''),
+    first: String(record.first_name || record.firstName || record.first || record.name?.split(' ')?.[0] || ''),
+    last: String(record.last_name || record.lastName || record.last || record.name?.split(' ')?.slice(1).join(' ') || ''),
+    role: String(record.role || record.roles || record.employee_role || ''),
+    gender: String(record.gender || ''),
+  })).filter(employee => employee.id && employee.first && employee.last);
+};
+
+export const employeePayload = ({phone, first, last, role, gender, age, experience}) => ({
+  // Send employee details only; permission assignment belongs to the admin flow.
+  phone_number: String(phone).replace(/\D/g, '').slice(-10),
+  name: `${String(first).trim()} ${String(last).trim()}`.trim(),
+  username: String(first).trim().toLowerCase().replace(/\s+/g, ''),
+  roles: String(role).trim().toLowerCase(),
+  gender: String(gender).trim().toLowerCase(),
+  description: 'Saloon employee',
+  ...(age !== undefined && String(age).trim() !== '' ? {age: Number(age)} : {}),
+  experience_years: experience !== undefined && String(experience).trim() !== '' ? Number(experience) : 0,
+});
+
+export const isAddressPrerequisiteError = error => error?.status === 400 && /please complete address added first/i.test(error?.message || '');
+
+function EmployeesScreen({salonId, initialEmployees = [], initialAddress, onAddressSaved, onBack, onSaveContinue}) {
   const [employees, setEmployees] = useState(initialEmployees);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [open, setOpen] = useState(false);
+  const [showAddress, setShowAddress] = useState(false);
+  const [addressDraft, setAddressDraft] = useState(initialAddress);
   const [phone, setPhone] = useState(''); const [first, setFirst] = useState(''); const [last, setLast] = useState('');
   const [role, setRole] = useState(''); const [gender, setGender] = useState(''); const [otp, setOtp] = useState('');
+  const [age, setAge] = useState('');
+  const [experience, setExperience] = useState('');
   const [otpSent, setOtpSent] = useState(false); const [verified, setVerified] = useState(false);
   const [roleOpen, setRoleOpen] = useState(false); const [genderOpen, setGenderOpen] = useState(false);
-  const openForm = () => {setPhone('');setFirst('');setLast('');setRole('');setGender('');setOtp('');setOtpSent(false);setVerified(false);setRoleOpen(false);setGenderOpen(false);setOpen(true);};
-  const canSave = verified && first.trim() && last.trim() && role && gender;
-  const save = () => {if (!canSave) return; setEmployees(v => [...v, {id:String(Date.now()), phone, first:first.trim(), last:last.trim(), role, gender}]); setOpen(false);};
+  const openForm = () => {setPhone('');setFirst('');setLast('');setRole('');setGender('');setAge('');setExperience('');setOtp('');setOtpSent(false);setVerified(false);setRoleOpen(false);setGenderOpen(false);setOpen(true);};
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      setLoading(true);
+      try {
+        const values = readEmployees(await onboardingService.getEmployees(salonId));
+        if (active) { setEmployees(values); }
+      } catch (error) {
+        if (active) { Alert.alert('Unable to load employees', error?.message || 'Please try again.'); }
+      } finally {
+        if (active) { setLoading(false); }
+      }
+    };
+    load();
+    return () => { active = false; };
+  }, [salonId]);
+  const canSave = verified && first.trim() && last.trim() && role && gender && !saving;
+  const save = async () => {
+    if (!canSave) { return; }
+    setSaving(true);
+    try {
+      await onboardingService.createEmployee(salonId, employeePayload({phone, first, last, role, gender, age, experience}));
+      const values = readEmployees(await onboardingService.getEmployees(salonId));
+      setEmployees(values);
+      setOpen(false);
+    } catch (error) {
+      if (isAddressPrerequisiteError(error)) {
+        Alert.alert('Unable to save employee', 'Please save the salon address first, then retry saving this employee. Your employee details will be kept.', [
+          {text: 'Cancel', style: 'cancel'},
+          {text: 'Complete Address', onPress: () => setShowAddress(true)},
+        ]);
+      } else {
+        Alert.alert('Unable to save employee', error?.message || 'Please try again.');
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (showAddress) {
+    return <AddressScreen salonId={salonId} initialValues={addressDraft} onBack={() => setShowAddress(false)} onSave={values => {
+      setAddressDraft(values);
+      onAddressSaved?.(values);
+      setShowAddress(false);
+    }} />;
+  }
   return <SafeAreaView style={s.screen}>
     <StatusBar barStyle="light-content" backgroundColor="#07113D" />
-    <View style={s.header}><Pressable onPress={onBack} style={s.back}><Text style={s.backText}>‹</Text></Pressable><Text style={s.headerTitle}>Employees</Text></View>
+    <View style={s.header}><Pressable accessibilityLabel="Go back" onPress={onBack} style={s.back}><Ionicons name="arrow-back" size={21} color="#FFFFFF" /></Pressable><Text style={s.headerTitle}>Employees</Text></View>
     <View style={s.progress}><Text style={s.step}>Step 5 of 8</Text><View style={s.track}><View style={s.fill} /></View></View>
-    {!open && <View style={s.card}>{!employees.length ? <><View style={s.empty}><Image source={emptyIcon} resizeMode="contain" style={s.icon} /><Text style={s.emptyTitle}>No employees added yet</Text><Text style={s.desc}>Tap the button below to add{`\n`}your first employee.</Text></View><Pressable onPress={openForm} style={s.add}><Text style={s.plus}>＋</Text><Text style={s.addText}>Add employee</Text></Pressable></> : <><Text style={s.listTitle}>Employees added</Text><ScrollView>{employees.map(e => <View key={e.id} style={s.employee}><View style={s.avatar}><Text style={s.avatarText}>{e.first[0]}{e.last[0]}</Text></View><View style={s.employeeCopy}><Text style={s.name}>{e.first} {e.last}</Text><Text style={s.meta}>{e.role}</Text></View><View style={s.right}><Text style={s.phone}>{e.phone}</Text><Text style={s.meta}>{e.gender}</Text></View></View>)}</ScrollView><Pressable onPress={openForm} style={s.addMore}><Text style={s.plus}>＋</Text><Text style={s.addText}>Add more employees</Text></Pressable><View style={s.footer}><Pressable onPress={onBack} style={s.cancel}><Text style={s.cancelText}>Cancel</Text></Pressable><Pressable onPress={() => onSaveContinue?.(employees)} style={s.primary}><Text style={s.primaryText}>Save &amp; Continue</Text></Pressable></View></>}
+    {!open && <View style={s.card}>{!employees.length ? <><View style={s.empty}><Image source={emptyIcon} resizeMode="contain" style={s.icon} /><Text style={s.emptyTitle}>No employees added yet</Text><Text style={s.desc}>Tap the button below to add{`\n`}your first employee.</Text></View><Pressable disabled={loading} onPress={openForm} style={s.add}><Text style={s.plus}>＋</Text><Text style={s.addText}>Add employee</Text></Pressable></> : <><Text style={s.listTitle}>Employees added</Text><ScrollView>{employees.map(e => <View key={e.id} style={s.employee}><View style={s.avatar}><Text style={s.avatarText}>{e.first[0]}{e.last[0]}</Text></View><View style={s.employeeCopy}><Text style={s.name}>{e.first} {e.last}</Text><Text style={s.meta}>{e.role}</Text></View><View style={s.right}><Text style={s.phone}>{e.phone}</Text><Text style={s.meta}>{e.gender}</Text></View></View>)}</ScrollView><Pressable onPress={openForm} style={s.addMore}><Text style={s.plus}>＋</Text><Text style={s.addText}>Add more employees</Text></Pressable><View style={s.footer}><Pressable onPress={onBack} style={s.cancel}><Text style={s.cancelText}>Cancel</Text></Pressable><Pressable onPress={() => onSaveContinue?.(employees)} style={s.primary}><Text style={s.primaryText}>Save &amp; Continue</Text></Pressable></View></>}
     </View>}
     {open && <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.formScreen}><View style={s.sheet}><View style={s.sheetHead}><Text style={s.sheetTitle}>Add employee</Text><Pressable hitSlop={10} onPress={() => setOpen(false)}><Text style={s.close}>×</Text></Pressable></View><ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.form} showsVerticalScrollIndicator={false}>
       <Text style={s.label}>Phone Number *</Text><View style={s.phoneRow}><View style={s.code}><Text style={s.codeText}>+91</Text><View style={s.codeChevron}><Chevron /></View></View><TextInput editable={!verified} keyboardType="number-pad" maxLength={10} value={phone} onChangeText={v => {setPhone(v.replace(/\D/g,''));setOtpSent(false);setVerified(false);}} placeholder="Enter phone number" placeholderTextColor="#9AA2B5" style={[s.input,s.phoneInput]} /><Pressable disabled={phone.length !== 10 || verified} onPress={() => {setOtp('');setOtpSent(true);}} style={[s.send, (phone.length !== 10 || verified) && s.faded]}><Text style={[s.sendText,verified && s.green]}>{verified?'Verified':otpSent?'Sent':'Send OTP'}</Text></Pressable></View>
@@ -28,6 +108,8 @@ function EmployeesScreen({initialEmployees = [], onBack, onSaveContinue}) {
       <Text style={s.label}>Last Name *</Text><TextInput value={last} onChangeText={setLast} placeholder="Enter last name" placeholderTextColor="#9AA2B5" style={s.input} />
       <Dropdown label="Role *" value={role} placeholder="Select role" items={ROLES} open={roleOpen} toggle={() => {setRoleOpen(v=>!v);setGenderOpen(false);}} select={v => {setRole(v);setRoleOpen(false);}} />
       <Dropdown label="Gender *" value={gender} placeholder="Select gender" items={GENDERS} open={genderOpen} toggle={() => {setGenderOpen(v=>!v);setRoleOpen(false);}} select={v => {setGender(v);setGenderOpen(false);}} />
+      <Text style={s.label}>Age</Text><TextInput accessibilityLabel="Age" value={age} onChangeText={v => setAge(v.replace(/\D/g, ''))} keyboardType="number-pad" maxLength={3} placeholder="Enter age" placeholderTextColor="#9AA2B5" style={s.input} />
+      <Text style={s.label}>Experience (years)</Text><TextInput accessibilityLabel="Experience in years" value={experience} onChangeText={v => setExperience(v.replace(/\D/g, ''))} keyboardType="number-pad" maxLength={2} placeholder="Enter years of experience" placeholderTextColor="#9AA2B5" style={s.input} />
       {verified && <View style={s.info}><Text style={s.infoIcon}>ⓘ</Text><Text style={s.infoText}>Employee can log in with this mobile number.</Text></View>}
     </ScrollView><View style={s.sheetFooter}><Pressable onPress={() => setOpen(false)} style={s.cancel}><Text style={s.cancelText}>Cancel</Text></Pressable><Pressable disabled={!canSave} onPress={save} style={[s.primary,!canSave&&s.disabled]}><Text style={s.primaryText}>Save</Text></Pressable></View></View></KeyboardAvoidingView>}
   </SafeAreaView>;

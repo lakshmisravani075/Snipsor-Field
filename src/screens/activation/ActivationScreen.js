@@ -1,17 +1,13 @@
-import React, {useMemo, useRef, useState} from 'react';
-import {Alert, FlatList, Image, Linking, Modal, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
+import {Alert, Animated, AppState, FlatList, Image, Linking, Modal, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View} from 'react-native';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
 import {launchImageLibrary} from 'react-native-image-picker';
 import {Camera, useCameraDevice, useCameraPermission, useCodeScanner} from 'react-native-vision-camera';
+import LogoutScreen from '../profile/LogoutScreen.js';
+import {activationService} from '../../services/apiService.js';
+import {extractActivationSalons, mergeActivationDetails, normalizeActivationSalon} from './activationSalons.js';
 
 const FILTERS = ['All', 'QR Pending', 'Training Pending', 'Ready Activation'];
-const SALONS = [
-  {id: '1', qrId: 'QR-0001', name: 'Hair & Beyond', address: 'Tirupati, Andhra Pradesh', owner: 'Meena Reddy', phone: '+91 98765 43210', date: 'Completed on 18 May 2026', status: 'QR Pending'},
-  {id: '2', qrId: 'QR-0002', name: 'Style Studio', address: 'Vijayawada, Andhra Pradesh', owner: 'Ravi Kumar', phone: '+91 91234 56789', date: 'Onboarding completed', status: 'Training Pending'},
-  {id: '3', qrId: 'QR-0003', name: 'Bella Looks', address: 'Visakhapatnam, Andhra Pradesh', owner: 'Anita Sharma', phone: '+91 99887 76655', date: 'Completed on 16 May 2026', status: 'Ready Activation'},
-  {id: '4', qrId: 'QR-0004', name: 'The Hair Lounge', address: 'Guntur, Andhra Pradesh', owner: 'Suresh Babu', phone: '+91 94400 11223', date: 'Completed on 14 May 2026', status: 'Training Pending'},
-  {id: '5', qrId: 'QR-0005', name: 'Cut & Care', address: 'Kurnool, Andhra Pradesh', owner: 'Priya Nair', phone: '+91 97011 22334', date: 'Completed on 12 May 2026', status: 'Ready Activation'},
-];
 
 const STATUS_STYLES = {
   'QR Pending': {backgroundColor: '#FFF7E9', color: '#D97508'},
@@ -20,9 +16,16 @@ const STATUS_STYLES = {
 };
 
 const QR_SCAN_TIMEOUT_MS = 12000;
+// KYC submission moves a salon into the activation queue asynchronously. A
+// freshly opened queue can therefore briefly be empty even though the submit
+// request already succeeded. Retry only that empty initial result; a non-empty
+// list and all errors retain their existing behavior.
+const EMPTY_QUEUE_RETRY_DELAYS_MS = [750, 1500];
+const isTrainingCompletionStatusError = error => error?.status === 400
+  && /invalid status for\s+training[_ ]completed/i.test(error?.message || '');
 const QR_ERRORS = {
-  invalid: {title: 'Invalid QR Code', message: 'This QR code is not recognized.'},
-  mismatch: {title: 'Salon mismatch', message: 'This QR belongs to a different salon.'},
+  api: {title: 'QR verification not saved', message: 'Unable to complete QR verification. Tap Scan Again to retry.'},
+  camera: {title: 'Camera unavailable', message: 'The camera could not start. Tap Scan Again to retry.'},
   unclear: {
     title: 'QR code not clear',
     message: 'Unable to scan this QR code.',
@@ -30,41 +33,8 @@ const QR_ERRORS = {
   },
 };
 
-const normalizeQrId = value => String(value || '').trim().toUpperCase();
-
-function parseSalonQr(rawValue) {
-  const value = String(rawValue || '').trim();
-  if (!value) {
-    return null;
-  }
-
-  let payload = {};
-  try {
-    const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      payload = parsed;
-    }
-  } catch {
-    // URL and key/value QR formats are handled below.
-  }
-
-  const normalizedPayload = Object.keys(payload).reduce((result, key) => {
-    result[key.toLowerCase().replace(/[^a-z0-9]/g, '')] = payload[key];
-    return result;
-  }, {});
-  const findValue = pattern => value.match(pattern)?.[1];
-  let salonId = normalizedPayload.salonid || findValue(/(?:salon[_-]?id)["'=:\s%]+([a-z0-9_-]+)/i);
-  let qrId = normalizedPayload.qrcodeid || normalizedPayload.qrid || findValue(/(?:qr(?:code)?[_-]?id)["'=:\s%]+([a-z0-9_-]+)/i);
-  salonId = salonId || value.match(/\bSAL-\d{4}\b/i)?.[0];
-  qrId = qrId || value.match(/\bQR-\d{4}\b/i)?.[0];
-  if (!salonId || !qrId) {
-    return null;
-  }
-  return {salonId: normalizeQrId(salonId), qrId: normalizeQrId(qrId)};
-}
-
 function SalonCard({salon, onPress}) {
-  const badge = STATUS_STYLES[salon.status];
+  const badge = STATUS_STYLES[salon.status] || STATUS_STYLES['QR Pending'];
   const actionLabel = salon.status === 'QR Pending' ? 'Start Activation' : 'Continue Activation';
   return (
     <View style={styles.card}>
@@ -89,7 +59,7 @@ function SalonCard({salon, onPress}) {
       <Pressable accessibilityRole="button" onPress={onPress} style={({pressed}) => [styles.cardActivationButton, pressed && styles.pressed]}>
         <Text numberOfLines={1} style={styles.cardActivationButtonText}>{actionLabel}</Text>
       </Pressable>
-      <Text style={styles.cardSalonId}>Salon ID: SAL-{salon.id.padStart(4, '0')}</Text>
+      <Text style={styles.cardSalonId}>Salon ID: {salon.displayId}</Text>
     </View>
   );
 }
@@ -125,39 +95,69 @@ function ProgressStep({number, title, description, state, last, onPress}) {
   );
 }
 
-function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
+export function QrVerificationScreen({salon, onBack, onContinue, onVerified, onSessionExpired}) {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const requestVersion = useRef(0);
+  useEffect(() => () => { requestVersion.current += 1; }, []);
+  const [isCameraReady, setIsCameraReady] = useState(false);
+  const [cameraSession, setCameraSession] = useState(0);
+  const [isForeground, setIsForeground] = useState(AppState.currentState === 'active');
   const [isScanning, setIsScanning] = useState(true);
   const [scannedValue, setScannedValue] = useState(null);
   const [scanError, setScanError] = useState(null);
   const [isTorchOn, setIsTorchOn] = useState(false);
   const isProcessingRef = useRef(false);
+  const scanLinePosition = useRef(new Animated.Value(-90)).current;
   const {hasPermission, requestPermission} = useCameraPermission();
   const cameraDevice = useCameraDevice('back');
-  const expectedSalonId = `SAL-${salon.id.padStart(4, '0')}`;
-  const expectedQrId = salon.qrId;
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', state => {
+      setIsForeground(state === 'active');
+      if (state !== 'active') {
+        setIsCameraReady(false);
+        setIsTorchOn(false);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
   const codeScanner = useCodeScanner({
     codeTypes: ['qr'],
-    onCodeScanned: codes => {
-      if (!isScanning || isProcessingRef.current) {
+    onCodeScanned: async codes => {
+      // A native `onCodeScanned` event is itself proof that the camera is
+      // ready. Waiting for the separately-rendered preview state can discard
+      // the first scan before its state update has reached this closure.
+      if (!isForeground || !isScanning || isProcessingRef.current) {
         return;
       }
       const qrCode = codes.find(code => code.type === 'qr');
-      if (qrCode?.value) {
+      if (qrCode?.value?.trim()) {
         isProcessingRef.current = true;
         setIsScanning(false);
         setIsTorchOn(false);
-        const qrPayload = parseSalonQr(qrCode.value);
-        if (!qrPayload) {
-          setScanError('invalid');
-          return;
-        }
-        if (qrPayload.salonId !== expectedSalonId || qrPayload.qrId !== expectedQrId) {
-          setScanError('mismatch');
-          return;
-        }
         setScanError(null);
-        setScannedValue(qrPayload.qrId);
-        onVerified?.();
+        if (!salon.id) {
+          setScanError('api');
+          Alert.alert('Salon ID unavailable', 'Unable to verify this salon. Please try again.');
+          return;
+        }
+        const version = ++requestVersion.current;
+        setIsSubmitting(true);
+        try {
+          const response = await activationService.completeQr(salon.id);
+          if (version !== requestVersion.current) { return; }
+          setScannedValue(qrCode.value);
+          onVerified?.(response);
+        } catch (error) {
+          if (version !== requestVersion.current) { return; }
+          setScanError('api');
+          if (error?.status === 401) {
+            Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onSessionExpired}]);
+          } else {
+            Alert.alert('Unable to verify QR', error?.message || 'Please try again.');
+          }
+        } finally {
+          if (version === requestVersion.current) { setIsSubmitting(false); }
+        }
       }
     },
   });
@@ -169,7 +169,7 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
   }, [hasPermission, requestPermission]);
 
   React.useEffect(() => {
-    if (!hasPermission || !cameraDevice || !isScanning) {
+    if (!hasPermission || !cameraDevice || !isScanning || !isCameraReady || !isForeground) {
       return undefined;
     }
     const timeout = setTimeout(() => {
@@ -179,9 +179,28 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
       setIsTorchOn(false);
     }, QR_SCAN_TIMEOUT_MS);
     return () => clearTimeout(timeout);
-  }, [cameraDevice, hasPermission, isScanning]);
+  }, [cameraDevice, hasPermission, isScanning, isCameraReady, isForeground]);
+
+  React.useEffect(() => {
+    if (!isScanning || !isCameraReady || !isForeground) {
+      scanLinePosition.stopAnimation();
+      return undefined;
+    }
+    const scanAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(scanLinePosition, {toValue: 90, duration: 1600, useNativeDriver: true}),
+        Animated.timing(scanLinePosition, {toValue: -90, duration: 1600, useNativeDriver: true}),
+      ]),
+    );
+    scanAnimation.start();
+    return () => scanAnimation.stop();
+  }, [isScanning, isCameraReady, isForeground, scanLinePosition]);
 
   const handleScanAgain = () => {
+    if (isSubmitting) { return; }
+    setIsCameraReady(false);
+    setIsTorchOn(false);
+    setCameraSession(value => value + 1);
     isProcessingRef.current = false;
     setScannedValue(null);
     setScanError(null);
@@ -218,21 +237,31 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
               <Ionicons name="location-outline" size={12} color="#68718D" />
               <Text style={styles.qrSalonDetailText}>{salon.address}</Text>
             </View>
-            <Text style={styles.qrSalonId}>Salon ID: SAL-{salon.id.padStart(4, '0')}</Text>
+            <Text style={styles.qrSalonId}>Salon ID: {salon.displayId}</Text>
           </View>
         </View>
         <Text style={styles.qrTitle}>Verify Salon QR</Text>
         <Text style={styles.qrSubtitle}>Scan the salon QR code to verify and map it to this salon.</Text>
         <View style={styles.scannerBox}>
+          <View collapsable={false} style={styles.scannerViewport}>
           {hasPermission && cameraDevice ? (
             <Camera
+              key={cameraSession}
               androidPreviewViewType="texture-view"
               device={cameraDevice}
-              isActive
+              isActive={isForeground}
+              onPreviewStarted={() => setIsCameraReady(true)}
+              onPreviewStopped={() => setIsCameraReady(false)}
+              onError={() => {
+                setIsCameraReady(false);
+                setIsTorchOn(false);
+                setIsScanning(false);
+                setScanError('camera');
+              }}
               codeScanner={codeScanner}
               resizeMode="cover"
               style={styles.scannerCameraPreview}
-              torch={isTorchOn ? 'on' : 'off'}
+              torch={isTorchOn && isForeground && isCameraReady && cameraDevice.hasTorch ? 'on' : 'off'}
             />
           ) : (
             <Pressable onPress={requestPermission} style={styles.permissionButton}>
@@ -240,16 +269,19 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
               <Text style={styles.permissionText}>Allow Camera</Text>
             </Pressable>
           )}
-          <View style={styles.scanLineOutline} />
-          <View style={[styles.scanCornerOutline, styles.scanCornerOutlineTopLeft]} />
-          <View style={[styles.scanCornerOutline, styles.scanCornerOutlineTopRight]} />
-          <View style={[styles.scanCornerOutline, styles.scanCornerOutlineBottomLeft]} />
-          <View style={[styles.scanCornerOutline, styles.scanCornerOutlineBottomRight]} />
-          <View style={styles.scanLine} />
-          <View style={[styles.scanCorner, styles.scanCornerTopLeft]} />
-          <View style={[styles.scanCorner, styles.scanCornerTopRight]} />
-          <View style={[styles.scanCorner, styles.scanCornerBottomLeft]} />
-          <View style={[styles.scanCorner, styles.scanCornerBottomRight]} />
+          <View pointerEvents="none" style={styles.scanFrame}>
+            <Animated.View style={[styles.scanLineOutline, {transform: [{translateY: scanLinePosition}]}]} />
+            <Animated.View style={[styles.scanLine, {transform: [{translateY: scanLinePosition}]}]} />
+            <View style={[styles.scanCornerOutline, styles.scanCornerOutlineTopLeft]} />
+            <View style={[styles.scanCornerOutline, styles.scanCornerOutlineTopRight]} />
+            <View style={[styles.scanCornerOutline, styles.scanCornerOutlineBottomLeft]} />
+            <View style={[styles.scanCornerOutline, styles.scanCornerOutlineBottomRight]} />
+            <View style={[styles.scanCorner, styles.scanCornerTopLeft]} />
+            <View style={[styles.scanCorner, styles.scanCornerTopRight]} />
+            <View style={[styles.scanCorner, styles.scanCornerBottomLeft]} />
+            <View style={[styles.scanCorner, styles.scanCornerBottomRight]} />
+          </View>
+          </View>
         </View>
         {errorContent && (
           <View style={styles.qrErrorCard}>
@@ -282,12 +314,18 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
               <View style={styles.verifiedSalonCopy}>
                 <Text style={styles.verifiedSalonName}>{salon.name}</Text>
                 <Text style={styles.verifiedSalonAddress}>{salon.address}</Text>
-                <Text numberOfLines={1} style={styles.verifiedSalonId}>Salon ID: SAL-{salon.id.padStart(4, '0')}  •  QR ID: {scannedValue}</Text>
+                <Text numberOfLines={1} style={styles.verifiedSalonId}>Salon ID: {salon.displayId}  •  QR ID: {scannedValue}</Text>
               </View>
             </View>
           </View>
         )}
-        <Pressable disabled={!hasPermission || !isScanning} onPress={() => setIsTorchOn(value => !value)} style={styles.flashButton}>
+        <Pressable disabled={!hasPermission || !isCameraReady || !isForeground} onPress={() => {
+          if (!cameraDevice?.hasTorch) {
+            Alert.alert('Flash unavailable', 'This camera does not have a flash.');
+            return;
+          }
+          setIsTorchOn(value => !value);
+        }} style={styles.flashButton}>
           <Ionicons name="flash-outline" size={15} color="#4932EF" />
           <Text style={styles.flashText}>{isTorchOn ? 'Turn off Flash' : 'Turn on Flash'}</Text>
         </Pressable>
@@ -301,10 +339,12 @@ function QrVerificationScreen({salon, onBack, onContinue, onVerified}) {
           ))}
         </View>
         <View style={styles.qrActionButtons}>
-          <Pressable onPress={handleScanAgain} style={({pressed}) => [styles.scanAgainButton, pressed && styles.pressed]}>
-            <Ionicons name="refresh" size={16} color="#102A72" />
-            <Text style={styles.scanAgainText}>Scan Again</Text>
-          </Pressable>
+          {!isScanning && (
+            <Pressable disabled={isSubmitting} onPress={handleScanAgain} style={({pressed}) => [styles.scanAgainButton, pressed && styles.pressed]}>
+              <Ionicons name="refresh" size={16} color="#102A72" />
+              <Text style={styles.scanAgainText}>Scan Again</Text>
+            </Pressable>
+          )}
           <Pressable
             accessibilityRole="button"
             onPress={handleContinue}
@@ -376,11 +416,12 @@ function SelfieCamera({visible, onClose, onCaptured}) {
   );
 }
 
-function TrainingScreen({salon, onBack, onCompleted}) {
+function TrainingScreen({salon, onBack, onCompleted, onSessionExpired}) {
   const [isTrainingCompleted, setIsTrainingCompleted] = useState(false);
   const [selfieUri, setSelfieUri] = useState(null);
   const [isSelfieCameraVisible, setIsSelfieCameraVisible] = useState(false);
   const [note, setNote] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const applyPickerResult = result => {
     if (result.errorMessage) {
@@ -416,9 +457,57 @@ function TrainingScreen({salon, onBack, onCompleted}) {
     ]);
   };
 
-  const markCompleted = () => {
-    setIsTrainingCompleted(true);
-    onCompleted?.();
+  const markCompleted = async () => {
+    if (isSubmitting || !salon.id) { return; }
+    setIsSubmitting(true);
+    try {
+      // The list can be stale after another device/user completes a step.
+      // Always use the backend's current state before requesting a transition.
+      const detailsResponse = await activationService.getSalonDetails(salon.id);
+      const liveSalon = mergeActivationDetails(detailsResponse, salon);
+      if (liveSalon.status === 'Ready Activation') {
+        setIsTrainingCompleted(true);
+        onCompleted?.(liveSalon);
+        return;
+      }
+      if (liveSalon.status !== 'Training Pending') {
+        Alert.alert(
+          'Training cannot be completed',
+          `The salon is currently at ${liveSalon.status || 'an unavailable'} activation status. Refresh the salon and complete the required previous step.`,
+        );
+        return;
+      }
+      await activationService.completeTraining(salon.id);
+      setIsTrainingCompleted(true);
+      onCompleted?.(liveSalon);
+    } catch (error) {
+      // A status-transition error is not proof that training has completed.
+      // Re-read the salon from the API and advance only if its live status
+      // confirms that the backend recorded the completion.
+      if (isTrainingCompletionStatusError(error)) {
+        try {
+          const response = await activationService.getSalonDetails(salon.id);
+          const liveSalon = mergeActivationDetails(response, salon);
+          if (liveSalon.status === 'Ready Activation') {
+            setIsTrainingCompleted(true);
+            onCompleted?.(liveSalon);
+            return;
+          }
+        } catch (statusError) {
+          if (statusError?.status === 401) {
+            Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onSessionExpired}]);
+            return;
+          }
+        }
+      }
+      if (error?.status === 401) {
+        Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onSessionExpired}]);
+      } else {
+        Alert.alert('Unable to complete training', error?.message || 'Please try again.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -455,7 +544,7 @@ function TrainingScreen({salon, onBack, onCompleted}) {
             </View>
             <View style={styles.trainingMetaRow}>
               <Ionicons name="git-branch-outline" size={12} color="#4932EF" />
-              <Text style={styles.trainingMetaText}>Salon ID: SAL-{salon.id.padStart(4, '0')}</Text>
+              <Text style={styles.trainingMetaText}>Salon ID: {salon.displayId}</Text>
             </View>
             <View style={styles.trainingMetaRow}>
               <Ionicons name="person-outline" size={12} color="#4932EF" />
@@ -520,7 +609,7 @@ function TrainingScreen({salon, onBack, onCompleted}) {
           <Pressable onPress={onBack} style={({pressed}) => [styles.trainingSaveButton, pressed && styles.pressed]}>
             <Text style={styles.trainingSaveText}>Save & Exit</Text>
           </Pressable>
-          <Pressable onPress={markCompleted} style={({pressed}) => [styles.trainingCompleteButton, pressed && styles.pressed]}>
+          <Pressable disabled={isSubmitting} onPress={markCompleted} style={({pressed}) => [styles.trainingCompleteButton, pressed && styles.pressed]}>
             <Text style={styles.trainingCompleteText}>Mark Training Completed</Text>
           </Pressable>
         </View>
@@ -539,17 +628,15 @@ function TrainingScreen({salon, onBack, onCompleted}) {
   );
 }
 
-function ActivationResultScreen({salon, result, stepStatuses, onBack, onGoToSalons, onCompleteSteps}) {
+function ActivationResultScreen({salon, result, onBack, onGoToSalons}) {
   const isSuccess = result === 'success';
   const isRejected = result === 'rejected';
-  const color = isSuccess ? '#0AA554' : isRejected ? '#EF2638' : '#F28A13';
-  const icon = isSuccess ? 'checkmark' : isRejected ? 'close' : 'hourglass-outline';
-  const title = isSuccess ? 'Salon Activated Successfully!' : isRejected ? 'Salon Activation Rejected' : 'Activation Steps Pending';
+  const color = isSuccess ? '#0AA554' : '#EF2638';
+  const icon = isSuccess ? 'checkmark' : 'close';
+  const title = isSuccess ? 'Salon Activated Successfully!' : 'Salon Activation Rejected';
   const description = isSuccess
     ? 'Your salon has been activated successfully. You can now start managing your salon.'
-    : isRejected
-      ? "We're sorry, your salon activation request has been rejected."
-      : 'Your salon activation is in progress. Please complete the remaining steps to activate your salon.';
+    : "We're sorry, your salon activation request has been rejected.";
 
   return (
     <SafeAreaView style={styles.activationResultScreen}>
@@ -578,7 +665,7 @@ function ActivationResultScreen({salon, result, stepStatuses, onBack, onGoToSalo
               <Text style={styles.activationResultFieldValue}>{salon.name}</Text>
               <View style={styles.activationResultFieldDivider} />
               <Text style={styles.activationResultFieldLabel}>Salon ID</Text>
-              <Text style={styles.activationResultFieldValue}>SAL-{salon.id.padStart(4, '0')}</Text>
+              <Text style={styles.activationResultFieldValue}>{salon.displayId}</Text>
             </View>
           </View>
         )}
@@ -590,24 +677,6 @@ function ActivationResultScreen({salon, result, stepStatuses, onBack, onGoToSalo
           </View>
         )}
 
-        {!isSuccess && !isRejected && (
-          <View style={styles.activationPendingCard}>
-            <Text style={styles.activationPendingTitle}>Pending Steps</Text>
-            {[
-              ['qr-code-outline', 'QR Verification', stepStatuses.qr],
-              ['school-outline', 'Training', stepStatuses.training],
-              ['checkmark-circle-outline', 'Ready to Activate', stepStatuses.ready],
-            ].map(([itemIcon, label, isComplete]) => (
-              <View key={label} style={styles.activationPendingRow}>
-                <View style={styles.activationPendingIcon}><Ionicons name={itemIcon} size={18} color="#563BE8" /></View>
-                <Text style={styles.activationPendingLabel}>{label}</Text>
-                <View style={[styles.activationPendingBadge, isComplete && styles.activationCompletedBadge]}>
-                  <Text style={[styles.activationPendingBadgeText, isComplete && styles.activationCompletedBadgeText]}>{isComplete ? 'Completed' : 'Pending'}</Text>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
       </ScrollView>
 
       <View style={styles.activationResultActions}>
@@ -617,10 +686,10 @@ function ActivationResultScreen({salon, result, stepStatuses, onBack, onGoToSalo
           </Pressable>
         )}
         <Pressable
-          onPress={isSuccess || isRejected ? onGoToSalons : onCompleteSteps}
+          onPress={onGoToSalons}
           style={({pressed}) => [isRejected ? styles.activationResultSecondaryButton : styles.activationResultPrimaryButton, pressed && styles.pressed]}>
           <Text style={isRejected ? styles.activationResultSecondaryText : styles.activationResultPrimaryText}>
-            {isSuccess ? 'Go to Salons' : isRejected ? 'Back to Salons' : 'Complete Steps'}
+            {isSuccess ? 'Go to Salons' : 'Back to Salons'}
           </Text>
         </Pressable>
       </View>
@@ -628,20 +697,34 @@ function ActivationResultScreen({salon, result, stepStatuses, onBack, onGoToSalo
   );
 }
 
-function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCompleted, onBack, onGoToSalons, onCompleteSteps}) {
+function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCompleted, onBack, onGoToSalons, onCompleteSteps, onSessionExpired}) {
   const [isActivationConfirmed, setIsActivationConfirmed] = useState(false);
   const [activationResult, setActivationResult] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const activateSalon = () => {
-    if (!isActivationConfirmed) {
+  const activateSalon = async () => {
+    if (!isActivationConfirmed || isSubmitting) {
       return;
     }
-    onReadyCompleted?.();
     if (!qrVerified || !trainingCompleted) {
-      setActivationResult('pending');
+      onCompleteSteps?.();
       return;
     }
-    setActivationResult(salon.activationStatus === 'Rejected' ? 'rejected' : 'success');
+    if (!salon.id) { return; }
+    setIsSubmitting(true);
+    try {
+      const response = await activationService.activateSalon(salon.id);
+      onReadyCompleted?.(response);
+      setActivationResult('success');
+    } catch (error) {
+      if (error?.status === 401) {
+        Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onSessionExpired}]);
+      } else {
+        Alert.alert('Unable to activate salon', error?.message || 'Please try again.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   if (activationResult) {
@@ -649,10 +732,8 @@ function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCom
       <ActivationResultScreen
         salon={salon}
         result={activationResult}
-        stepStatuses={{qr: qrVerified, training: trainingCompleted, ready: true}}
         onBack={() => setActivationResult(null)}
         onGoToSalons={onGoToSalons}
-        onCompleteSteps={onCompleteSteps}
       />
     );
   }
@@ -684,7 +765,7 @@ function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCom
             <View style={styles.readyDetailsRow}>
               <View style={styles.readySalonMeta}>
                 <Ionicons name="git-branch-outline" size={12} color="#4932EF" />
-                <Text style={styles.readySalonMetaText}>Salon ID: SAL-{salon.id.padStart(4, '0')}</Text>
+                <Text style={styles.readySalonMetaText}>Salon ID: {salon.displayId}</Text>
               </View>
               <View style={styles.readySalonMeta}>
                 <Ionicons name="person-outline" size={12} color="#4932EF" />
@@ -746,18 +827,18 @@ function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCom
           <Text style={styles.readySaveText}>Save & Exit</Text>
         </Pressable>
         <Pressable
-          disabled={!isActivationConfirmed}
+          disabled={!isActivationConfirmed || isSubmitting}
           onPress={activateSalon}
           style={({pressed}) => [styles.readyActivateButton, !isActivationConfirmed && styles.readyActivateButtonDisabled, pressed && styles.pressed]}>
           <Ionicons name="rocket-outline" size={16} color="#FFFFFF" />
-          <Text style={styles.readyActivateButtonText}>Activate Salon</Text>
+          <Text style={styles.readyActivateButtonText}>{isSubmitting ? 'Activating...' : 'Activate Salon'}</Text>
         </Pressable>
       </View>
     </SafeAreaView>
   );
 }
 
-function ActivationDetails({salon, onBack}) {
+function ActivationDetails({salon, onBack, onSessionExpired}) {
   const [showQrVerification, setShowQrVerification] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
   const [showReadyToActivate, setShowReadyToActivate] = useState(false);
@@ -805,6 +886,7 @@ function ActivationDetails({salon, onBack}) {
     return (
       <QrVerificationScreen
         salon={salon}
+        onSessionExpired={onSessionExpired}
         onBack={() => setShowQrVerification(false)}
         onVerified={() => setIsQrVerified(true)}
         onContinue={() => {
@@ -819,6 +901,7 @@ function ActivationDetails({salon, onBack}) {
     return (
       <TrainingScreen
         salon={salon}
+        onSessionExpired={onSessionExpired}
         onBack={() => setShowTraining(false)}
         onCompleted={() => {
           setIsTrainingCompleted(true);
@@ -833,6 +916,7 @@ function ActivationDetails({salon, onBack}) {
     return (
       <ReadyToActivateScreen
         salon={salon}
+        onSessionExpired={onSessionExpired}
         qrVerified={isQrVerified}
         trainingCompleted={isTrainingCompleted}
         onReadyCompleted={() => setIsReadyCompleted(true)}
@@ -902,17 +986,22 @@ function ActivationDetails({salon, onBack}) {
             <Text style={styles.progressHeading}>Activation Progress</Text>
             <Text style={styles.progressCount}>Step {currentStep} of 3</Text>
           </View>
-          {steps.map(([title, description], index) => (
-            <ProgressStep
-              key={title}
-              number={index + 1}
-              title={title}
-              description={description}
-              state={[isQrVerified, isTrainingCompleted, isReadyCompleted][index] ? 'complete' : 'pending'}
-              last={index === steps.length - 1}
-              onPress={index === 0 ? () => setShowQrVerification(true) : index === 1 ? () => setShowTraining(true) : () => setShowReadyToActivate(true)}
-            />
-          ))}
+          {steps.map(([title, description], index) => {
+            const isComplete = [isQrVerified, isTrainingCompleted, isReadyCompleted][index];
+            const isCurrent = index === currentStep - 1;
+            const openStep = index === 0 ? () => setShowQrVerification(true) : index === 1 ? () => setShowTraining(true) : () => setShowReadyToActivate(true);
+            return (
+              <ProgressStep
+                key={title}
+                number={index + 1}
+                title={title}
+                description={description}
+                state={isComplete ? 'complete' : isCurrent ? 'pending' : 'locked'}
+                last={index === steps.length - 1}
+                onPress={isComplete || isCurrent ? openStep : undefined}
+              />
+            );
+          })}
         </View>
       </ScrollView>
       <Pressable accessibilityRole="button" onPress={handleContinueActivation} style={({pressed}) => [styles.activationButton, pressed && styles.pressed]}>
@@ -934,32 +1023,103 @@ function Detail({icon, text, large = false}) {
   );
 }
 
-function BottomBar() {
+function BottomBar({onSalons, onProfile, activeTab = 'salons'}) {
   return (
     <View style={styles.bottomBar}>
-      <Pressable style={styles.navItem}>
-        <Ionicons name="storefront-outline" size={23} color="#4D32F4" />
-        <Text style={[styles.navLabel, styles.navLabelActive]}>Salons</Text>
+      <Pressable onPress={onSalons} style={styles.navItem}>
+        <Ionicons name="storefront-outline" size={23} color={activeTab === 'salons' ? '#4D32F4' : '#142354'} />
+        <Text style={[styles.navLabel, activeTab === 'salons' && styles.navLabelActive]}>Salons</Text>
       </Pressable>
-      <Pressable style={styles.navItem}>
-        <Ionicons name="person-outline" size={23} color="#142354" />
-        <Text style={styles.navLabel}>Profile</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="Profile" onPress={onProfile} style={styles.navItem}>
+        <Ionicons name="person-outline" size={23} color={activeTab === 'profile' ? '#4D32F4' : '#142354'} />
+        <Text style={[styles.navLabel, activeTab === 'profile' && styles.navLabelActive]}>Profile</Text>
       </Pressable>
     </View>
   );
 }
 
-function ActivationScreen() {
+function ActivationScreen({onLogout}) {
+  const detailsRequest = useRef(0);
+  const isLoadingDetails = useRef(false);
+  useEffect(() => () => { detailsRequest.current += 1; }, []);
+  const openSalon = async item => {
+    if (isLoadingDetails.current) { return; }
+    isLoadingDetails.current = true;
+    const requestId = ++detailsRequest.current;
+    try {
+      const response = await activationService.getSalonDetails(item.id);
+      const details = mergeActivationDetails(response, item);
+      if (requestId === detailsRequest.current) { setSelectedSalon(details); }
+    } catch (error) {
+      if (requestId !== detailsRequest.current) { return; }
+      if (error?.status === 401) {
+        Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onLogout}]);
+        return;
+      }
+      Alert.alert('Unable to load salon details', error?.message || 'Please try again.', [
+        {text: 'Cancel', style: 'cancel'}, {text: 'Retry', onPress: () => openSalon(item)},
+      ]);
+    } finally {
+      isLoadingDetails.current = false;
+    }
+  };
+  const [salons, setSalons] = useState([]);
   const [activeFilter, setActiveFilter] = useState('All');
   const [isSearchActive, setIsSearchActive] = useState(false);
   const [selectedSalon, setSelectedSalon] = useState(null);
+  const [showProfile, setShowProfile] = useState(false);
+  useEffect(() => {
+    if (selectedSalon || showProfile) { return undefined; }
+    let mounted = true;
+    let retryTimeout;
+    let emptyQueueRetry = 0;
+    const loadSalons = async () => {
+      if (!mounted) { return; }
+      try {
+        const response = await activationService.getSalons();
+        const nextSalons = extractActivationSalons(response).map(normalizeActivationSalon);
+        if (nextSalons.some(salon => !salon.id)) { throw new Error('A salon is missing its ID. Please try again.'); }
+        if (!mounted) { return; }
+        setSalons(nextSalons);
+        const delay = EMPTY_QUEUE_RETRY_DELAYS_MS[emptyQueueRetry];
+        if (!nextSalons.length && delay != null) {
+          emptyQueueRetry += 1;
+          retryTimeout = setTimeout(loadSalons, delay);
+        }
+      } catch (error) {
+        if (!mounted) { return; }
+        if (error?.status === 401) {
+          Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onLogout}]);
+          return;
+        }
+        Alert.alert('Unable to load salons', error?.message || 'Please try again.', [
+          {text: 'Cancel', style: 'cancel'}, {text: 'Retry', onPress: loadSalons},
+        ]);
+      }
+    };
+    loadSalons();
+    return () => {
+      mounted = false;
+      clearTimeout(retryTimeout);
+    };
+  }, [selectedSalon, showProfile, onLogout]);
   const filteredSalons = useMemo(
-    () => activeFilter === 'All' ? SALONS : SALONS.filter(salon => salon.status === activeFilter),
-    [activeFilter],
+    () => activeFilter === 'All' ? salons : salons.filter(salon => salon.status === activeFilter),
+    [activeFilter, salons],
   );
 
+  if (showProfile) {
+    return (
+      <LogoutScreen
+        onLogout={onLogout}
+        onBack={() => setShowProfile(false)}
+        bottomBar={<BottomBar activeTab="profile" onSalons={() => setShowProfile(false)} />}
+      />
+    );
+  }
+
   if (selectedSalon) {
-    return <ActivationDetails salon={selectedSalon} onBack={() => setSelectedSalon(null)} />;
+    return <ActivationDetails salon={selectedSalon} onBack={() => setSelectedSalon(null)} onSessionExpired={onLogout} />;
   }
 
   return (
@@ -993,10 +1153,10 @@ function ActivationScreen() {
         contentContainerStyle={styles.listContent}
         data={filteredSalons}
         keyExtractor={item => item.id}
-        renderItem={({item}) => <SalonCard salon={item} onPress={() => setSelectedSalon(item)} />}
+        renderItem={({item}) => <SalonCard salon={item} onPress={() => openSalon(item)} />}
         showsVerticalScrollIndicator={false}
       />
-      <BottomBar />
+      <BottomBar onProfile={() => setShowProfile(true)} />
     </SafeAreaView>
   );
 }
@@ -1020,7 +1180,7 @@ const styles = StyleSheet.create({
   cardMain: {minHeight: 111, flexDirection: 'row', alignItems: 'flex-start', paddingHorizontal: 10},
   cardActivationButton: {position: 'absolute', right: 10, bottom: 27, width: 139, height: 30, borderRadius: 6, backgroundColor: '#071F68', flexDirection: 'row', alignItems: 'center', justifyContent: 'center'},
   cardActivationButtonText: {color: '#FFFFFF', fontFamily: 'Poppins_600SemiBold', fontSize: 8.5, textAlign: 'center'},
-  cardSalonId: {position: 'absolute', right: 14, bottom: 9, width: 132, color: '#7A849B', fontFamily: 'Inter_400Regular', fontSize: 7.5, textAlign: 'center'},
+  cardSalonId: {position: 'absolute', left: 10, right: 10, bottom: 9, color: '#7A849B', fontFamily: 'Inter_400Regular', fontSize: 7.5, textAlign: 'center'},
   pressed: {opacity: 0.86},
   salonIconBox: {width: 49, height: 49, borderWidth: 1, borderColor: '#D8DFF1', borderRadius: 8, backgroundColor: '#F8FAFF', alignItems: 'center', justifyContent: 'center', marginRight: 10},
   cardContent: {flex: 1},
@@ -1214,21 +1374,23 @@ const styles = StyleSheet.create({
   qrTitle: {color: '#111936', fontFamily: 'Poppins_600SemiBold', fontSize: 17, textAlign: 'center', marginTop: 18},
   qrSubtitle: {color: '#68718D', fontFamily: 'Inter_400Regular', fontSize: 9.5, lineHeight: 14, textAlign: 'center', marginTop: 3, paddingHorizontal: 55},
   scannerBox: {height: 360, width: '100%', alignSelf: 'center', backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', marginTop: 14, overflow: 'hidden'},
-  scannerCameraPreview: {position: 'absolute', left: 48, right: 48, top: 48, bottom: 48},
+  scannerViewport: {width: 246, height: 246, position: 'relative', alignItems: 'center', justifyContent: 'center', overflow: 'hidden'},
+  scannerCameraPreview: {position: 'absolute', top: 0, left: 0, width: 246, height: 246},
   permissionButton: {alignItems: 'center', justifyContent: 'center'},
   permissionText: {color: '#111936', fontFamily: 'Inter_500Medium', fontSize: 10, marginTop: 7},
-  scanLineOutline: {position: 'absolute', left: 84, right: 84, top: '50%', height: 4, marginTop: -1, borderRadius: 2, backgroundColor: 'rgba(17, 25, 54, 0.45)'},
-  scanLine: {position: 'absolute', left: 85, right: 85, top: '50%', height: 2, backgroundColor: '#FFFFFF', shadowColor: '#FFFFFF', shadowOpacity: 0.45, shadowRadius: 5, elevation: 3},
+  scanFrame: {position: 'absolute', top: 13, right: 13, bottom: 13, left: 13},
+  scanLineOutline: {position: 'absolute', left: 7, right: 7, top: '50%', height: 4, marginTop: -2, borderRadius: 2, backgroundColor: 'rgba(17, 25, 54, 0.45)'},
+  scanLine: {position: 'absolute', left: 8, right: 8, top: '50%', height: 2, marginTop: -1, backgroundColor: '#FFFFFF', shadowColor: '#FFFFFF', shadowOpacity: 0.45, shadowRadius: 5, elevation: 3},
   scanCornerOutline: {position: 'absolute', width: 32, height: 32, borderColor: 'rgba(17, 25, 54, 0.55)'},
-  scanCornerOutlineTopLeft: {left: 75, top: 75, borderLeftWidth: 5, borderTopWidth: 5, borderTopLeftRadius: 7},
-  scanCornerOutlineTopRight: {right: 75, top: 75, borderRightWidth: 5, borderTopWidth: 5, borderTopRightRadius: 7},
-  scanCornerOutlineBottomLeft: {left: 75, bottom: 75, borderLeftWidth: 5, borderBottomWidth: 5, borderBottomLeftRadius: 7},
-  scanCornerOutlineBottomRight: {right: 75, bottom: 75, borderRightWidth: 5, borderBottomWidth: 5, borderBottomRightRadius: 7},
+  scanCornerOutlineTopLeft: {left: 0, top: 0, borderLeftWidth: 5, borderTopWidth: 5, borderTopLeftRadius: 7},
+  scanCornerOutlineTopRight: {right: 0, top: 0, borderRightWidth: 5, borderTopWidth: 5, borderTopRightRadius: 7},
+  scanCornerOutlineBottomLeft: {left: 0, bottom: 0, borderLeftWidth: 5, borderBottomWidth: 5, borderBottomLeftRadius: 7},
+  scanCornerOutlineBottomRight: {right: 0, bottom: 0, borderRightWidth: 5, borderBottomWidth: 5, borderBottomRightRadius: 7},
   scanCorner: {position: 'absolute', width: 30, height: 30},
-  scanCornerTopLeft: {left: 76, top: 76, borderColor: '#FFFFFF', borderLeftWidth: 3, borderTopWidth: 3, borderTopLeftRadius: 6},
-  scanCornerTopRight: {right: 76, top: 76, borderColor: '#FFFFFF', borderRightWidth: 3, borderTopWidth: 3, borderTopRightRadius: 6},
-  scanCornerBottomLeft: {left: 76, bottom: 76, borderColor: '#FFFFFF', borderLeftWidth: 3, borderBottomWidth: 3, borderBottomLeftRadius: 6},
-  scanCornerBottomRight: {right: 76, bottom: 76, borderColor: '#FFFFFF', borderRightWidth: 3, borderBottomWidth: 3, borderBottomRightRadius: 6},
+  scanCornerTopLeft: {left: 1, top: 1, borderColor: '#FFFFFF', borderLeftWidth: 3, borderTopWidth: 3, borderTopLeftRadius: 6},
+  scanCornerTopRight: {right: 1, top: 1, borderColor: '#FFFFFF', borderRightWidth: 3, borderTopWidth: 3, borderTopRightRadius: 6},
+  scanCornerBottomLeft: {left: 1, bottom: 1, borderColor: '#FFFFFF', borderLeftWidth: 3, borderBottomWidth: 3, borderBottomLeftRadius: 6},
+  scanCornerBottomRight: {right: 1, bottom: 1, borderColor: '#FFFFFF', borderRightWidth: 3, borderBottomWidth: 3, borderBottomRightRadius: 6},
   qrErrorCard: {minHeight: 72, borderWidth: 1, borderColor: '#FFD2D5', borderRadius: 9, backgroundColor: '#FFF5F5', flexDirection: 'row', alignItems: 'flex-start', paddingHorizontal: 12, paddingVertical: 11, marginTop: 10},
   qrErrorIcon: {width: 27, height: 27, borderRadius: 14, backgroundColor: '#EF3E49', alignItems: 'center', justifyContent: 'center', marginTop: 1},
   qrErrorCopy: {flex: 1, marginLeft: 10},

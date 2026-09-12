@@ -1,9 +1,8 @@
-import React, {useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {
   Alert,
   Image,
   Linking,
-  NativeModules,
   PermissionsAndroid,
   Platform,
   Pressable,
@@ -16,22 +15,113 @@ import {
   View,
 } from 'react-native';
 import Geolocation from 'react-native-geolocation-service';
+import {onboardingService} from '../../../services/apiService';
+
+const emptyDetails = {door: '', building: '', floor: '', area: '', street: '', landmark: '', city: '', district: '', state: '', pincode: '', country: ''};
+
+export const addressPayload = ({details, coordinate}) => ({
+  shop_number: details.door.trim(), building_name: details.building.trim(),
+  floor: details.floor.trim(), area_locality: details.area.trim(),
+  street: details.street.trim(), landmark: details.landmark.trim(),
+  city: details.city.trim(), state: details.state.trim(), pincode: details.pincode.trim(),
+  latitude: coordinate.latitude, longitude: coordinate.longitude,
+});
+
+export const readAddress = (response, draft) => {
+  if (!response || response.success === false) { throw new Error(response?.message || 'Unable to load address.'); }
+  const record = response.data ?? response;
+  if (typeof record !== 'object' || Array.isArray(record) || !('shop_number' in record)) {
+    throw new Error('The server returned an invalid address response.');
+  }
+  const latitude = record.latitude == null || record.latitude === '' ? NaN : Number(record.latitude);
+  const longitude = record.longitude == null || record.longitude === '' ? NaN : Number(record.longitude);
+  const text = value => value == null ? '' : String(value);
+  return {
+    coordinate: Number.isFinite(latitude) && Number.isFinite(longitude) ? {latitude, longitude} : null,
+    // These fields are not in the observed backend address projection. Keep the
+    // user's draft without inventing request keys or discarding their input.
+    placeId: draft?.placeId || '',
+    details: {...emptyDetails, district: draft?.details?.district || '', country: draft?.details?.country || '', door: text(record.shop_number), building: text(record.building_name),
+      floor: text(record.floor), area: text(record.area_locality), street: text(record.street),
+      landmark: text(record.landmark), city: text(record.city), state: text(record.state), pincode: text(record.pincode)},
+  };
+};
 
 const mapPinIcon = require('../../../assets/icons/address-location-pin.png');
 const selectMapIcon = require('../../../assets/icons/address-select-map.png');
 const currentLocationIcon = require('../../../assets/icons/address-current-location.png');
 const mapPreview = require('../../../assets/icons/address-map-preview.png');
 
+export const getAddressLocation = async () => {
+  const locate = options => new Promise((resolve, reject) => {
+    Geolocation.getCurrentPosition(({coords}) => {
+      if (!Number.isFinite(coords?.latitude) || !Number.isFinite(coords?.longitude)) {
+        reject({code: 2, message: 'No valid location was returned.'});
+        return;
+      }
+      resolve({latitude: coords.latitude, longitude: coords.longitude});
+    }, reject, options);
+  });
+  if (Platform.OS !== 'android') {
+    return locate({enableHighAccuracy: true, timeout: 20000, maximumAge: 5000});
+  }
+  try {
+    return await locate({enableHighAccuracy: true, timeout: 12000, maximumAge: 5000, showLocationDialog: true});
+  } catch (error) {
+    if (![2, 3, 4, 5].includes(error?.code)) { throw error; }
+    // GPS can be unavailable indoors even when location and permissions are on.
+    return locate({enableHighAccuracy: false, timeout: 15000, maximumAge: 5000,
+      showLocationDialog: true, forceLocationManager: error.code === 4});
+  }
+};
+
+const locationErrorMessage = error => {
+  if (error?.code === 1) { return 'Please allow location access in app settings and try again.'; }
+  if (error?.code === 3) { return 'The phone could not get a location fix in time. Try near a window or outdoors and retry.'; }
+  if (error?.code === 5) { return 'Please enable location and Google Location Accuracy in device settings, then try again.'; }
+  return 'The phone could not determine your location. Check your GPS signal or network connection and try again.';
+};
+
 function Field({label, value, onChangeText, required, placeholder}) {
   return <View style={styles.field}><Text style={styles.label}>{label}{required && <Text style={styles.required}> *</Text>}</Text><TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor="#A1A7B8" style={styles.input} /></View>;
 }
 
-function AddressScreen({initialValues, onBack, onSave}) {
+function AddressScreen({salonId, initialValues, onBack, onSave, onAddressVerified}) {
   const [coordinate, setCoordinate] = useState(initialValues?.coordinate || null);
   const [placeId, setPlaceId] = useState(initialValues?.placeId || '');
   const [currentLocationLoading, setCurrentLocationLoading] = useState(false);
   const [mapLoading, setMapLoading] = useState(false);
-  const [details, setDetails] = useState(initialValues?.details || {door: '', building: '', floor: '', area: '', street: '', landmark: '', city: '', district: '', state: '', pincode: '', country: ''});
+  const [details, setDetails] = useState({...emptyDetails, ...initialValues?.details});
+  const [busy, setBusy] = useState(true);
+  const mounted = useRef(true);
+  const pending = useRef(false);
+  const verified = useRef(onAddressVerified);
+  const initialDraft = useRef(initialValues);
+  verified.current = onAddressVerified;
+  useEffect(() => {
+    let active = true;
+    mounted.current = true;
+    const load = async () => {
+      if (!active) { return; }
+      setBusy(true);
+      try {
+        const values = readAddress(await onboardingService.getAddress(salonId), initialDraft.current);
+        if (!active) { return; }
+        setDetails(values.details);
+        setCoordinate(values.coordinate);
+        setPlaceId(values.placeId);
+        verified.current?.(Boolean(values.coordinate && values.details.city && values.details.state && values.details.pincode));
+      } catch (error) {
+        if (!active) { return; }
+        verified.current?.(false);
+        Alert.alert('Unable to load address', error?.message || 'Please try again.', [{text: 'Cancel', style: 'cancel'}, {text: 'Retry', onPress: load}]);
+      } finally {
+        if (active) { setBusy(false); }
+      }
+    };
+    load();
+    return () => { active = false; mounted.current = false; };
+  }, [salonId]);
   const setField = key => value => setDetails(current => ({...current, [key]: value}));
 
   const reverseGeocode = async point => {
@@ -66,22 +156,14 @@ function AddressScreen({initialValues, onBack, onSave}) {
     try {
       const point = await getDeviceLocation();
       selectPoint(point);
-    } catch {
-      Alert.alert('Location unavailable', 'Turn on device location and try again.');
+    } catch (error) {
+      Alert.alert('Location unavailable', locationErrorMessage(error));
     } finally {
       setCurrentLocationLoading(false);
     }
   };
 
-  const getDeviceLocation = () => {
-    const locationRequest = Platform.OS === 'android'
-      ? NativeModules.DeviceLocation.getCurrentLocation()
-      : new Promise((resolve, reject) => Geolocation.getCurrentPosition(({coords}) => resolve({latitude: coords.latitude, longitude: coords.longitude}), reject, {enableHighAccuracy: true, timeout: 20000, maximumAge: 5000}));
-    return Promise.race([
-      locationRequest.then(location => ({latitude: location.latitude, longitude: location.longitude})),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Location timed out')), 22000)),
-    ]);
-  };
+  const getDeviceLocation = getAddressLocation;
 
   const openMapAtCurrentLocation = async () => {
     if (!(await requestPermission())) {
@@ -94,12 +176,12 @@ function AddressScreen({initialValues, onBack, onSave}) {
       selectPoint(point);
       const mapUrl = `https://www.google.com/maps/search/?api=1&query=${point.latitude},${point.longitude}`;
       await Linking.openURL(mapUrl);
-    } catch {
+    } catch (error) {
       if (coordinate) {
         const mapUrl = `https://www.google.com/maps/search/?api=1&query=${coordinate.latitude},${coordinate.longitude}`;
         await Linking.openURL(mapUrl);
       } else {
-        Alert.alert('Location unavailable', 'Turn on device location, then tap Select on map again.');
+        Alert.alert('Location unavailable', locationErrorMessage(error));
       }
     } finally {
       setMapLoading(false);
@@ -107,13 +189,33 @@ function AddressScreen({initialValues, onBack, onSave}) {
   };
 
   const valid = Boolean(coordinate && details.city && details.state && details.pincode && details.country);
+  const save = async () => {
+    if (!valid || busy || currentLocationLoading || mapLoading || pending.current) { return; }
+    pending.current = true;
+    setBusy(true);
+    verified.current?.(false);
+    try {
+      const response = await onboardingService.saveAddress(salonId, addressPayload({details, coordinate}));
+      if (!response || response.success === false) { throw new Error(response?.message || 'The server did not confirm the address save.'); }
+      const saved = readAddress(await onboardingService.getAddress(salonId), {details, placeId});
+      if (!saved.coordinate || !saved.details.city || !saved.details.state || !saved.details.pincode) {
+        throw new Error('The server did not return a complete saved address.');
+      }
+      if (mounted.current) { onSave(saved); }
+    } catch (error) {
+      if (mounted.current) { Alert.alert('Unable to save address', error?.message || 'Please try again.'); }
+    } finally {
+      pending.current = false;
+      if (mounted.current) { setBusy(false); }
+    }
+  };
 
   return <SafeAreaView style={styles.screen}>
     <StatusBar barStyle="light-content" backgroundColor="#07113D" />
-    <View style={styles.header}><Pressable onPress={onBack} style={styles.back}><Text style={styles.backText}>←</Text></Pressable><Text style={styles.title}>Add Address</Text></View>
+    <View style={styles.header}><Pressable disabled={busy} onPress={onBack} style={styles.back}><Text style={styles.backText}>←</Text></Pressable><Text style={styles.title}>Add Address</Text></View>
     <View style={styles.progress}><Text style={styles.step}>Step 3 of 8</Text><View style={styles.track}><View style={styles.fill} /></View></View>
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <View style={styles.card}>
+      <View pointerEvents={busy ? 'none' : 'auto'} style={styles.card}>
         <Text style={styles.cardTitle}>Tell us where the salon is located</Text><Text style={styles.subtitle}>Search and select the exact location on map.</Text>
         <View style={styles.mapWrap}><Image source={mapPreview} resizeMode="cover" style={styles.map} /></View>
         <View style={styles.mapButtons}><Pressable disabled={currentLocationLoading || mapLoading} onPress={useCurrentLocation} style={styles.mapButton}><Image source={currentLocationIcon} resizeMode="contain" style={styles.buttonIcon} /><Text style={styles.mapButtonText}>{currentLocationLoading ? 'Locating...' : 'Use current location'}</Text></Pressable><Pressable disabled={currentLocationLoading || mapLoading} onPress={openMapAtCurrentLocation} style={styles.mapButton}><Image source={selectMapIcon} resizeMode="contain" style={styles.buttonIcon} /><Text style={styles.mapButtonText}>{mapLoading ? 'Locating...' : 'Select on map'}</Text></Pressable></View>
@@ -128,7 +230,7 @@ function AddressScreen({initialValues, onBack, onSave}) {
         <View style={styles.placeBox}><View style={styles.iconTitleRow}><Image source={selectMapIcon} resizeMode="contain" style={styles.titleIcon} /><Text style={styles.iconTitle}>Google Maps Place ID (Auto-filled)</Text></View><Text style={styles.placeValue}>{placeId || 'Select a location on the map'}</Text></View>
       </View>
     </ScrollView>
-    <View style={styles.footer}><Pressable onPress={onBack} style={styles.cancel}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable disabled={!valid} onPress={() => onSave({coordinate, placeId, details})} style={[styles.save, !valid && styles.disabled]}><Text style={[styles.saveText, !valid && styles.disabledText]}>Save &amp; Continue</Text></Pressable></View>
+    <View style={styles.footer}><Pressable disabled={busy} onPress={onBack} style={styles.cancel}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable disabled={!valid || busy || currentLocationLoading || mapLoading} onPress={save} style={[styles.save, (!valid || busy) && styles.disabled]}><Text style={[styles.saveText, (!valid || busy) && styles.disabledText]}>{busy ? 'Please wait...' : 'Save & Continue'}</Text></Pressable></View>
   </SafeAreaView>;
 }
 
