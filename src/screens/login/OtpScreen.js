@@ -15,10 +15,11 @@ import {
   View,
 } from 'react-native';
 
+import {authService, setAuthToken} from '../../services/apiService';
+
 const heroArtwork = require('../../assets/images/relative/login-hero.png');
 const OTP_LENGTH = 6;
 const RESEND_SECONDS = 28;
-const DEMO_OTP = '123456';
 
 function OtpScreen({mobileNumber, onBack, onVerified}) {
   const [otpDigits, setOtpDigits] = useState(() =>
@@ -27,6 +28,7 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
   const [otpStatus, setOtpStatus] = useState(null);
   const [activeIndex, setActiveIndex] = useState(null);
   const [secondsLeft, setSecondsLeft] = useState(RESEND_SECONDS);
+  const [isVerifying, setIsVerifying] = useState(false);
   const inputRef = useRef(null);
   const {height} = useWindowDimensions();
   const heroHeight = Math.min(Math.max(height * 0.43, 300), 365);
@@ -79,17 +81,26 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
     setOtpStatus(null);
   };
 
-  const handleVerifyOtp = () => {
-    if (otp.length !== OTP_LENGTH) {
+  const handleVerifyOtp = async () => {
+    if (otp.length !== OTP_LENGTH || isVerifying) {
       return;
     }
 
-    if (otp === DEMO_OTP) {
+    try {
+      setIsVerifying(true);
+      const response = await authService.login(mobileNumber, otp);
+      const accessToken = response?.data?.accessToken;
+
+      if (accessToken) {
+        setAuthToken(accessToken);
+      }
       setOtpStatus('success');
       Keyboard.dismiss();
-      onVerified?.();
-    } else {
+      onVerified?.(response);
+    } catch (error) {
       setOtpStatus('error');
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -167,14 +178,6 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
                       otpStatus === 'error' && styles.otpBoxError,
                       otpStatus === 'success' && styles.otpBoxSuccess,
                       otpStatus === null &&
-                        Boolean(otpDigits[index]) &&
-                        otpDigits[index] === DEMO_OTP[index] &&
-                        styles.otpBoxSuccess,
-                      otpStatus === null &&
-                        Boolean(otpDigits[index]) &&
-                        otpDigits[index] !== DEMO_OTP[index] &&
-                        styles.otpBoxError,
-                      otpStatus === null &&
                         index === activeIndex &&
                         styles.otpBoxFocused,
                     ]}>
@@ -223,14 +226,16 @@ function OtpScreen({mobileNumber, onBack, onVerified}) {
 
               <Pressable
                 accessibilityRole="button"
-                disabled={otp.length !== OTP_LENGTH}
+                disabled={otp.length !== OTP_LENGTH || isVerifying}
                 onPress={handleVerifyOtp}
                 style={({pressed}) => [
                   styles.verifyButton,
                   pressed && styles.verifyButtonPressed,
                 ]}>
                 <View style={styles.buttonSpacer} />
-                <Text style={styles.buttonText}>Verify OTP</Text>
+                <Text style={styles.buttonText}>
+                  {isVerifying ? 'Verifying...' : 'Verify OTP'}
+                </Text>
                 <Text style={styles.arrow}>→</Text>
               </Pressable>
             </View>
