@@ -3,13 +3,17 @@ import TestRenderer, {act} from 'react-test-renderer';
 import {Alert} from 'react-native';
 import OnboardingTasksScreen from '../src/screens/onboarding/screens/OnboardingTasksScreen';
 import {extractSavedSalonId, extractTaskLeads, formatAssignedOn, mergeTaskDetails, normalizeOnboardingTask, readSavedBeneficiary, resolveOnboardingResumeStep} from '../src/screens/onboarding/onboardingTasks';
-import {leadService} from '../src/services/apiService';
+import {leadService, onboardingService} from '../src/services/apiService';
 
 jest.setTimeout(30000);
-jest.mock('../src/services/apiService', () => ({leadService: {getLeads: jest.fn(), getLeadDetails: jest.fn(), getOnboardingTimeline: jest.fn()}}));
+jest.mock('../src/services/apiService', () => ({
+  leadService: {getLeads: jest.fn(), getLeadDetails: jest.fn(), getOnboardingTimeline: jest.fn()},
+  onboardingService: {getBeneficiary: jest.fn()},
+}));
 beforeEach(() => {
   jest.clearAllMocks();
   leadService.getLeadDetails.mockImplementation(async leadId => ({data: {lead: {id: leadId}}}));
+  onboardingService.getBeneficiary.mockResolvedValue(null);
 });
 jest.mock('@react-native-vector-icons/ionicons/static', () => ({Ionicons: 'Icon'}));
 jest.mock('../src/screens/onboarding/screens/TaskDetailsScreen', () => 'TaskDetails');
@@ -92,6 +96,31 @@ test('renders fetched tasks, searches API data and opens onboarding with the rea
   await act(async () => button.props.onPress({stopPropagation: jest.fn()}));
   expect(renderer.root.findByType('SalonOnboarding').props.salon.leadId).toBe('live-2');
   expect(leadService.getOnboardingTimeline).not.toHaveBeenCalled();
+  await act(async () => renderer.unmount());
+});
+
+test('completing onboarding returns to tasks and removes that salon without opening activation', async () => {
+  leadService.getLeads.mockResolvedValue({data: [{id: 'completed-lead', salon_name: 'Completed Salon'}]});
+  let renderer;
+  await act(async () => { renderer = TestRenderer.create(<OnboardingTasksScreen />); });
+  const button = renderer.root.findAll(node => typeof node.props.onPress === 'function').find(node =>
+    node.props.onPress.length === 1 && node.findAll(child => child.props.children === 'Start Onboarding').length > 0);
+  await act(async () => button.props.onPress({stopPropagation: jest.fn()}));
+  await act(async () => renderer.root.findByType('SalonOnboarding').props.onOnboardingComplete());
+  expect(renderer.root.findAllByType('SalonOnboarding')).toHaveLength(0);
+  expect(renderer.root.findAll(node => node.props.children === 'Completed Salon')).toHaveLength(0);
+  await act(async () => renderer.unmount());
+});
+
+test('does not restore a task after sign-in when its KYC beneficiary was saved', async () => {
+  leadService.getLeads.mockResolvedValue({data: [{
+    id: 'submitted-lead', salon_id: 'saved-salon', salon_name: 'Submitted Salon', onboarding_status: 'KYC_PENDING',
+  }]});
+  onboardingService.getBeneficiary.mockResolvedValue({data: {beneficiary: {id: 'beneficiary-1'}}});
+  let renderer;
+  await act(async () => { renderer = TestRenderer.create(<OnboardingTasksScreen />); });
+  expect(onboardingService.getBeneficiary).toHaveBeenCalledWith('saved-salon');
+  expect(renderer.root.findAll(node => node.props.children === 'Submitted Salon')).toHaveLength(0);
   await act(async () => renderer.unmount());
 });
 

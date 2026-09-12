@@ -17,7 +17,7 @@ import SalonOnboardingScreen from './SalonOnboardingScreen.js';
 import LogoutScreen from '../../profile/LogoutScreen.js';
 import {Ionicons} from '@react-native-vector-icons/ionicons/static';
 import {leadService, onboardingService} from '../../../services/apiService.js';
-import {extractSavedSalonId, extractTaskLeads, formatAssignedOn, mergeTaskDetails, normalizeOnboardingTask, resolveOnboardingResumeStep} from '../onboardingTasks.js';
+import {extractSavedSalonId, extractTaskLeads, formatAssignedOn, mergeTaskDetails, normalizeOnboardingTask, readSavedBeneficiary, resolveOnboardingResumeStep} from '../onboardingTasks.js';
 
 const STATUS_COLORS = {
   New: {text: '#5A39EF', background: '#F0EDFF', icon: '#775DFF'},
@@ -62,11 +62,12 @@ function NavIcon({type, active}) {
   return <Ionicons name={name} size={22} color={color} />;
 }
 
-function OnboardingTasksScreen({onLogout, onOnboardingComplete}) {
+function OnboardingTasksScreen({onLogout}) {
   const [tasks, setTasks] = useState([]);
   const [query, setQuery] = useState('');
   const [selectedTask, setSelectedTask] = useState(null);
   const [onboardingTask, setOnboardingTask] = useState(null);
+  const [completedLeadIds, setCompletedLeadIds] = useState([]);
   const [activeTab, setActiveTab] = useState('tasks');
   const [profileOrigin, setProfileOrigin] = useState('tasks');
   const [loadingLeadId, setLoadingLeadId] = useState(null);
@@ -152,10 +153,23 @@ function OnboardingTasksScreen({onLogout, onOnboardingComplete}) {
       try {
         const response = await leadService.getLeads();
         // Completed salons belong to the Activation API, not the onboarding
-        // queue. Keep the cards unchanged; only omit records the backend has
-        // already marked as completed.
-        const nextTasks = extractTaskLeads(response).map(normalizeOnboardingTask)
-          .filter(task => !task.onboardingComplete);
+        // queue. A lead-list status can lag behind a successful KYC submission,
+        // so also use the persisted beneficiary as the durable completion
+        // signal. This prevents a submitted salon from reopening at Step 8
+        // after navigating back, refreshing, or signing in again.
+        const pendingTasks = extractTaskLeads(response).map(normalizeOnboardingTask)
+          .filter(task => !task.onboardingComplete && !completedLeadIds.includes(task.leadId));
+        const nextTasks = (await Promise.all(pendingTasks.map(async task => {
+          const salonId = extractSavedSalonId(task);
+          if (!salonId || !onboardingService?.getBeneficiary) { return task; }
+          try {
+            return readSavedBeneficiary(await onboardingService.getBeneficiary(salonId)) ? null : task;
+          } catch {
+            // A beneficiary lookup must not hide an otherwise actionable task
+            // when the server cannot be reached.
+            return task;
+          }
+        }))).filter(Boolean);
         if (nextTasks.some(task => !task.leadId)) {
           throw new Error('A lead is missing its ID. Please try again.');
         }
@@ -173,7 +187,7 @@ function OnboardingTasksScreen({onLogout, onOnboardingComplete}) {
     };
     loadTasks();
     return () => { mounted = false; };
-  }, [activeTab, selectedTask, onboardingTask, onLogout]);
+  }, [activeTab, selectedTask, onboardingTask, completedLeadIds, onLogout]);
   const openProfile = origin => {
     setProfileOrigin(origin);
     setActiveTab('profile');
@@ -187,7 +201,14 @@ function OnboardingTasksScreen({onLogout, onOnboardingComplete}) {
   }
 
   if (onboardingTask) {
-    return <SalonOnboardingScreen salon={onboardingTask} onBack={() => setOnboardingTask(null)} onOnboardingComplete={onOnboardingComplete} />;
+    return <SalonOnboardingScreen salon={onboardingTask} onBack={() => setOnboardingTask(null)} onOnboardingComplete={() => {
+      // Submission completes this salon's onboarding task.  Stay in this
+      // queue and hide it immediately; Activation is entered through login.
+      setCompletedLeadIds(current => current.includes(onboardingTask.leadId)
+        ? current : [...current, onboardingTask.leadId]);
+      setSelectedTask(null);
+      setOnboardingTask(null);
+    }} />;
   }
 
   if (activeTab === 'profile') {

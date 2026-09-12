@@ -16,50 +16,22 @@ const STATUS_STYLES = {
 };
 
 const QR_SCAN_TIMEOUT_MS = 12000;
+// KYC submission moves a salon into the activation queue asynchronously. A
+// freshly opened queue can therefore briefly be empty even though the submit
+// request already succeeded. Retry only that empty initial result; a non-empty
+// list and all errors retain their existing behavior.
+const EMPTY_QUEUE_RETRY_DELAYS_MS = [750, 1500];
+const isTrainingCompletionStatusError = error => error?.status === 400
+  && /invalid status for\s+training[_ ]completed/i.test(error?.message || '');
 const QR_ERRORS = {
   api: {title: 'QR verification not saved', message: 'Unable to complete QR verification. Tap Scan Again to retry.'},
   camera: {title: 'Camera unavailable', message: 'The camera could not start. Tap Scan Again to retry.'},
-  invalid: {title: 'Invalid QR Code', message: 'This QR code is not recognized.'},
-  mismatch: {title: 'Salon mismatch', message: 'This QR belongs to a different salon.'},
   unclear: {
     title: 'QR code not clear',
     message: 'Unable to scan this QR code.',
     hint: 'Make sure the QR is clear and try again.',
   },
 };
-
-const normalizeQrId = value => String(value || '').trim().toUpperCase();
-
-function parseSalonQr(rawValue) {
-  const value = String(rawValue || '').trim();
-  if (!value) {
-    return null;
-  }
-
-  let payload = {};
-  try {
-    const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      payload = parsed;
-    }
-  } catch {
-    // URL and key/value QR formats are handled below.
-  }
-
-  const normalizedPayload = Object.keys(payload).reduce((result, key) => {
-    result[key.toLowerCase().replace(/[^a-z0-9]/g, '')] = payload[key];
-    return result;
-  }, {});
-  const findValue = pattern => value.match(pattern)?.[1];
-  let salonId = normalizedPayload.salonid || findValue(/(?:salon[_-]?id)["'=:\s%]+([a-z0-9_-]+)/i);
-  let qrId = normalizedPayload.qrcodeid || normalizedPayload.qrid || findValue(/(?:qr(?:code)?[_-]?id)["'=:\s%]+([a-z0-9_-]+)/i);
-  salonId = salonId || value.match(/\bSAL-\d{4}\b/i)?.[0];
-  qrId = qrId || value.match(/\bQR-\d{4}\b/i)?.[0];
-  if (!salonId || !qrId) {
-    return null;
-  }
-  return {salonId: normalizeQrId(salonId), qrId: normalizeQrId(qrId)};
-}
 
 function SalonCard({salon, onPress}) {
   const badge = STATUS_STYLES[salon.status] || STATUS_STYLES['QR Pending'];
@@ -148,32 +120,24 @@ export function QrVerificationScreen({salon, onBack, onContinue, onVerified, onS
     });
     return () => subscription.remove();
   }, []);
-  const expectedSalonIds = [salon.id, salon.displayId].map(normalizeQrId);
-  const expectedQrId = normalizeQrId(salon.qrId);
   const codeScanner = useCodeScanner({
     codeTypes: ['qr'],
     onCodeScanned: async codes => {
-      if (!isForeground || !isCameraReady || !isScanning || isProcessingRef.current) {
+      // A native `onCodeScanned` event is itself proof that the camera is
+      // ready. Waiting for the separately-rendered preview state can discard
+      // the first scan before its state update has reached this closure.
+      if (!isForeground || !isScanning || isProcessingRef.current) {
         return;
       }
       const qrCode = codes.find(code => code.type === 'qr');
-      if (qrCode?.value) {
+      if (qrCode?.value?.trim()) {
         isProcessingRef.current = true;
         setIsScanning(false);
         setIsTorchOn(false);
-        const qrPayload = parseSalonQr(qrCode.value);
-        if (!qrPayload) {
-          setScanError('invalid');
-          return;
-        }
-        if (!expectedSalonIds.includes(qrPayload.salonId) || qrPayload.qrId !== expectedQrId) {
-          setScanError('mismatch');
-          return;
-        }
         setScanError(null);
-        if (!salon.id || salon.id === SAMPLE_SALON.id) {
+        if (!salon.id) {
           setScanError('api');
-          Alert.alert('Real salon required', 'The sample salon has no backend record. Select a salon returned by the API to save QR verification.');
+          Alert.alert('Salon ID unavailable', 'Unable to verify this salon. Please try again.');
           return;
         }
         const version = ++requestVersion.current;
@@ -181,7 +145,7 @@ export function QrVerificationScreen({salon, onBack, onContinue, onVerified, onS
         try {
           const response = await activationService.completeQr(salon.id);
           if (version !== requestVersion.current) { return; }
-          setScannedValue(qrPayload.qrId);
+          setScannedValue(qrCode.value);
           onVerified?.(response);
         } catch (error) {
           if (version !== requestVersion.current) { return; }
@@ -452,11 +416,12 @@ function SelfieCamera({visible, onClose, onCaptured}) {
   );
 }
 
-function TrainingScreen({salon, onBack, onCompleted}) {
+function TrainingScreen({salon, onBack, onCompleted, onSessionExpired}) {
   const [isTrainingCompleted, setIsTrainingCompleted] = useState(false);
   const [selfieUri, setSelfieUri] = useState(null);
   const [isSelfieCameraVisible, setIsSelfieCameraVisible] = useState(false);
   const [note, setNote] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const applyPickerResult = result => {
     if (result.errorMessage) {
@@ -492,9 +457,57 @@ function TrainingScreen({salon, onBack, onCompleted}) {
     ]);
   };
 
-  const markCompleted = () => {
-    setIsTrainingCompleted(true);
-    onCompleted?.();
+  const markCompleted = async () => {
+    if (isSubmitting || !salon.id) { return; }
+    setIsSubmitting(true);
+    try {
+      // The list can be stale after another device/user completes a step.
+      // Always use the backend's current state before requesting a transition.
+      const detailsResponse = await activationService.getSalonDetails(salon.id);
+      const liveSalon = mergeActivationDetails(detailsResponse, salon);
+      if (liveSalon.status === 'Ready Activation') {
+        setIsTrainingCompleted(true);
+        onCompleted?.(liveSalon);
+        return;
+      }
+      if (liveSalon.status !== 'Training Pending') {
+        Alert.alert(
+          'Training cannot be completed',
+          `The salon is currently at ${liveSalon.status || 'an unavailable'} activation status. Refresh the salon and complete the required previous step.`,
+        );
+        return;
+      }
+      await activationService.completeTraining(salon.id);
+      setIsTrainingCompleted(true);
+      onCompleted?.(liveSalon);
+    } catch (error) {
+      // A status-transition error is not proof that training has completed.
+      // Re-read the salon from the API and advance only if its live status
+      // confirms that the backend recorded the completion.
+      if (isTrainingCompletionStatusError(error)) {
+        try {
+          const response = await activationService.getSalonDetails(salon.id);
+          const liveSalon = mergeActivationDetails(response, salon);
+          if (liveSalon.status === 'Ready Activation') {
+            setIsTrainingCompleted(true);
+            onCompleted?.(liveSalon);
+            return;
+          }
+        } catch (statusError) {
+          if (statusError?.status === 401) {
+            Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onSessionExpired}]);
+            return;
+          }
+        }
+      }
+      if (error?.status === 401) {
+        Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onSessionExpired}]);
+      } else {
+        Alert.alert('Unable to complete training', error?.message || 'Please try again.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -596,7 +609,7 @@ function TrainingScreen({salon, onBack, onCompleted}) {
           <Pressable onPress={onBack} style={({pressed}) => [styles.trainingSaveButton, pressed && styles.pressed]}>
             <Text style={styles.trainingSaveText}>Save & Exit</Text>
           </Pressable>
-          <Pressable onPress={markCompleted} style={({pressed}) => [styles.trainingCompleteButton, pressed && styles.pressed]}>
+          <Pressable disabled={isSubmitting} onPress={markCompleted} style={({pressed}) => [styles.trainingCompleteButton, pressed && styles.pressed]}>
             <Text style={styles.trainingCompleteText}>Mark Training Completed</Text>
           </Pressable>
         </View>
@@ -684,20 +697,34 @@ function ActivationResultScreen({salon, result, onBack, onGoToSalons}) {
   );
 }
 
-function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCompleted, onBack, onGoToSalons, onCompleteSteps}) {
+function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCompleted, onBack, onGoToSalons, onCompleteSteps, onSessionExpired}) {
   const [isActivationConfirmed, setIsActivationConfirmed] = useState(false);
   const [activationResult, setActivationResult] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const activateSalon = () => {
-    if (!isActivationConfirmed) {
+  const activateSalon = async () => {
+    if (!isActivationConfirmed || isSubmitting) {
       return;
     }
     if (!qrVerified || !trainingCompleted) {
       onCompleteSteps?.();
       return;
     }
-    onReadyCompleted?.();
-    setActivationResult(salon.activationStatus === 'Rejected' ? 'rejected' : 'success');
+    if (!salon.id) { return; }
+    setIsSubmitting(true);
+    try {
+      const response = await activationService.activateSalon(salon.id);
+      onReadyCompleted?.(response);
+      setActivationResult('success');
+    } catch (error) {
+      if (error?.status === 401) {
+        Alert.alert('Session expired', 'Please log in again to continue.', [{text: 'OK', onPress: onSessionExpired}]);
+      } else {
+        Alert.alert('Unable to activate salon', error?.message || 'Please try again.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   if (activationResult) {
@@ -800,11 +827,11 @@ function ReadyToActivateScreen({salon, qrVerified, trainingCompleted, onReadyCom
           <Text style={styles.readySaveText}>Save & Exit</Text>
         </Pressable>
         <Pressable
-          disabled={!isActivationConfirmed}
+          disabled={!isActivationConfirmed || isSubmitting}
           onPress={activateSalon}
           style={({pressed}) => [styles.readyActivateButton, !isActivationConfirmed && styles.readyActivateButtonDisabled, pressed && styles.pressed]}>
           <Ionicons name="rocket-outline" size={16} color="#FFFFFF" />
-          <Text style={styles.readyActivateButtonText}>Activate Salon</Text>
+          <Text style={styles.readyActivateButtonText}>{isSubmitting ? 'Activating...' : 'Activate Salon'}</Text>
         </Pressable>
       </View>
     </SafeAreaView>
@@ -874,6 +901,7 @@ function ActivationDetails({salon, onBack, onSessionExpired}) {
     return (
       <TrainingScreen
         salon={salon}
+        onSessionExpired={onSessionExpired}
         onBack={() => setShowTraining(false)}
         onCompleted={() => {
           setIsTrainingCompleted(true);
@@ -888,6 +916,7 @@ function ActivationDetails({salon, onBack, onSessionExpired}) {
     return (
       <ReadyToActivateScreen
         salon={salon}
+        onSessionExpired={onSessionExpired}
         qrVerified={isQrVerified}
         trainingCompleted={isTrainingCompleted}
         onReadyCompleted={() => setIsReadyCompleted(true)}
@@ -1042,13 +1071,21 @@ function ActivationScreen({onLogout}) {
   useEffect(() => {
     if (selectedSalon || showProfile) { return undefined; }
     let mounted = true;
+    let retryTimeout;
+    let emptyQueueRetry = 0;
     const loadSalons = async () => {
       if (!mounted) { return; }
       try {
         const response = await activationService.getSalons();
         const nextSalons = extractActivationSalons(response).map(normalizeActivationSalon);
         if (nextSalons.some(salon => !salon.id)) { throw new Error('A salon is missing its ID. Please try again.'); }
-        if (mounted) { setSalons(nextSalons); }
+        if (!mounted) { return; }
+        setSalons(nextSalons);
+        const delay = EMPTY_QUEUE_RETRY_DELAYS_MS[emptyQueueRetry];
+        if (!nextSalons.length && delay != null) {
+          emptyQueueRetry += 1;
+          retryTimeout = setTimeout(loadSalons, delay);
+        }
       } catch (error) {
         if (!mounted) { return; }
         if (error?.status === 401) {
@@ -1061,7 +1098,10 @@ function ActivationScreen({onLogout}) {
       }
     };
     loadSalons();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+      clearTimeout(retryTimeout);
+    };
   }, [selectedSalon, showProfile, onLogout]);
   const filteredSalons = useMemo(
     () => activeFilter === 'All' ? salons : salons.filter(salon => salon.status === activeFilter),

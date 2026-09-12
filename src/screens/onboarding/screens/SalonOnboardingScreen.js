@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   Image,
   Pressable,
@@ -111,8 +111,18 @@ function SalonOnboardingScreen({salon, onBack, onOnboardingComplete}) {
   const [kycDetails, setKycDetails] = useState(savedState.kycDetails || null);
   const [kycComplete, setKycComplete] = useState(Boolean(savedState.kycComplete));
   const [submissionStatus, setSubmissionStatus] = useState(null);
+  // A beneficiary is the durable, server-side evidence that the final KYC
+  // step succeeded.  Keep this guard per mounted salon so a restoration and a
+  // local save cannot both try to navigate to Activation.
+  const completionSent = useRef(false);
   const basicDetailsSalonId = basicDetails?.salonId || savedSalonId;
   const viewingSubmission = Boolean(submissionStatus);
+  const completeOnboarding = useCallback(() => {
+    if (completionSent.current) { return; }
+    completionSent.current = true;
+    if (onOnboardingComplete) { onOnboardingComplete(); }
+    else { setSubmissionStatus(kycDetails?.reviewStatus || 'submitted'); }
+  }, [kycDetails?.reviewStatus, onOnboardingComplete]);
 
   useEffect(() => {
     if (!basicDetailsSalonId || savedState.kycComplete) { return undefined; }
@@ -272,8 +282,7 @@ function SalonOnboardingScreen({salon, onBack, onOnboardingComplete}) {
   const activeStep = kycComplete ? 8 : employeeAvailabilityComplete ? 8 : availabilityComplete ? 7 : employeesComplete ? 6 : servicesComplete ? 5 : addressComplete ? 4 : filesComplete ? 3 : basicComplete ? 2 : 1;
   const continueOnboarding = () => {
     if (kycComplete) {
-      if (onOnboardingComplete) { onOnboardingComplete(); }
-      else { setSubmissionStatus(kycDetails?.reviewStatus || 'submitted'); }
+      completeOnboarding();
     } else if (!basicComplete) { setShowBasicDetails(true); }
     else if (!filesComplete) { setShowFilesMedia(true); }
     else if (!addressComplete) { setShowAddress(true); }

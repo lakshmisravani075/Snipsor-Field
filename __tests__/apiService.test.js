@@ -192,6 +192,32 @@ describe('authenticated API requests', () => {
     await expect(activationService.completeQr('salon/1')).rejects.toThrow('QR incomplete');
   });
 
+  test('posts training completion to the live salon endpoint', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(jsonResponse({accessToken: 'mock-access-token'}))
+      .mockResolvedValueOnce(jsonResponse({success: true}));
+    await authService.login('9000000003', '123456');
+    await expect(activationService.completeTraining('salon/1')).resolves.toEqual({success: true});
+    const [url, options] = global.fetch.mock.calls[1];
+    expect(url).toBe('https://h6oc5ivg9a.execute-api.ap-south-1.amazonaws.com/dev/api/field/salons/salon%2F1/activation/training-completed');
+    expect(options.method).toBe('POST');
+    expect(options.headers.Authorization).toBe('Bearer mock-access-token');
+    expect(JSON.parse(options.body)).toEqual({});
+  });
+
+  test('posts final salon activation to the backend contract endpoint', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(jsonResponse({accessToken: 'mock-access-token'}))
+      .mockResolvedValueOnce(jsonResponse({success: true}));
+    await authService.login('9000000003', '123456');
+    await expect(activationService.activateSalon('salon/1')).resolves.toEqual({success: true});
+    const [url, options] = global.fetch.mock.calls[1];
+    expect(url).toBe('https://h6oc5ivg9a.execute-api.ap-south-1.amazonaws.com/dev/api/field/salons/salon%2F1/activate');
+    expect(options.method).toBe('POST');
+    expect(options.headers.Authorization).toBe('Bearer mock-access-token');
+    expect(JSON.parse(options.body)).toEqual({});
+  });
+
   test('fetches the selected salon details using an encoded ID and auth token', async () => {
     global.fetch = jest.fn()
       .mockResolvedValueOnce(jsonResponse({accessToken: 'mock-access-token'}))

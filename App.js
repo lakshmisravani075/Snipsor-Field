@@ -40,16 +40,6 @@ function App() {
     }
   };
 
-  // Onboarding and activation are separate queues.  Once a salon's KYC has
-  // been submitted, its next action belongs in the Activation screen rather
-  // than in the onboarding queue (which can otherwise keep showing a stale
-  // KYC-pending card until the leads list catches up).
-  const openActivation = () => {
-    setShowOnboarding(false);
-    setShowActivation(true);
-    setIsAuthenticated(false);
-  };
-
   useEffect(() => {
     let active = true;
     const restore = async () => {
@@ -80,7 +70,7 @@ function App() {
       ) : showActivation ? (
         <ActivationScreen onLogout={logout} />
       ) : showOnboarding ? (
-        <OnboardingTasksScreen onLogout={logout} onOnboardingComplete={openActivation} />
+        <OnboardingTasksScreen onLogout={logout} />
       ) : isAuthenticated ? (
         <HomeScreen onLogout={logout} />
       ) : mobileNumber ? (

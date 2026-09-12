@@ -28,7 +28,9 @@ test('saves a scanned QR once and permits training only after the API succeeds',
   });
   act(() => renderer.root.findByType('Camera').props.onPreviewStarted());
   const scan = renderer.root.findByType('Camera').props.codeScanner.onCodeScanned;
-  const codes = [{type: 'qr', value: JSON.stringify({salon_id: 'live-1', qr_id: 'QR-9012'})}];
+  // The live API determines whether the poster belongs to this selected salon;
+  // the client must not require a hard-coded QR payload format before posting.
+  const codes = [{type: 'qr', value: 'https://qr.snipsor.example/poster/live-1'}];
   act(() => { scan(codes); scan(codes); });
   expect(activationService.completeQr).toHaveBeenCalledTimes(1);
   expect(activationService.completeQr).toHaveBeenCalledWith('live-1');
@@ -43,6 +45,19 @@ test('saves a scanned QR once and permits training only after the API succeeds',
   expect(onContinue).toHaveBeenCalledTimes(1);
   await act(async () => renderer.unmount());
   alert.mockRestore();
+});
+
+test('posts the first native scan even if the preview-ready render has not completed', async () => {
+  AppState.currentState = 'active';
+  activationService.completeQr.mockResolvedValue({success: true});
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(<QrVerificationScreen salon={{id: 'live-2'}} />);
+  });
+  const scan = renderer.root.findByType('Camera').props.codeScanner.onCodeScanned;
+  await act(async () => scan([{type: 'qr', value: 'dynamic-qr-value'}]));
+  expect(activationService.completeQr).toHaveBeenCalledWith('live-2');
+  await act(async () => renderer.unmount());
 });
 
 test('waits for preview before timing out, permits flash after timeout and restarts failed camera', async () => {

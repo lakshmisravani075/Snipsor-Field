@@ -204,8 +204,14 @@ const authService = {
   },
 };
 
+const freshQueueRequest = {
+  cache: 'no-store',
+  headers: {'Cache-Control': 'no-store, no-cache, max-age=0', Pragma: 'no-cache'},
+};
+
 const leadService = {
-  getLeads: () => apiService.get('/field/leads'),
+  // A completed salon must leave this queue immediately after submission.
+  getLeads: () => apiService.get('/field/leads', freshQueueRequest),
   getLeadDetails: leadId => apiService.get(`/field/leads/${encodeURIComponent(leadId)}`),
   getOnboardingTimeline: async leadId => {
     if ((typeof leadId !== 'string' && typeof leadId !== 'number') || !String(leadId).trim()) {
@@ -228,12 +234,29 @@ const leadService = {
 };
 
 const activationService = {
-  getSalons: () => apiService.get('/field/activation/salons'),
+  // The activation queue is read directly after the onboarding transition.
+  getSalons: () => apiService.get('/field/activation/salons', freshQueueRequest),
   getSalonDetails: salonId => apiService.get(`/field/salons/${encodeURIComponent(salonId)}`),
   completeQr: async salonId => {
     const response = await apiService.post(`/field/salons/${encodeURIComponent(salonId)}/activation/qr-complete`, {});
     if (response?.success === false) {
       throw new ApiError(response.message || 'Unable to complete QR verification.', 200, response);
+    }
+    return response;
+  },
+  completeTraining: async salonId => {
+    const response = await apiService.post(`/field/salons/${encodeURIComponent(salonId)}/activation/training-completed`, {});
+    if (response?.success === false) {
+      throw new ApiError(response.message || 'Unable to complete training.', 200, response);
+    }
+    return response;
+  },
+  // Matches the deployed backend contract:
+  // POST /api/field/salons/:saloon_id/activate
+  activateSalon: async salonId => {
+    const response = await apiService.post(`/field/salons/${encodeURIComponent(salonId)}/activate`, {});
+    if (response?.success === false) {
+      throw new ApiError(response.message || 'Unable to activate the salon.', 200, response);
     }
     return response;
   },

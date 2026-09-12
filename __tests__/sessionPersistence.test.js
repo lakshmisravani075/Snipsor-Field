@@ -70,17 +70,6 @@ test('keeps the existing splash visible until session restoration finishes', asy
   await act(async () => renderer.unmount());
 });
 
-test('opens activation after a completed onboarding submission', async () => {
-  await authService.login('9000000002', '123456');
-  let renderer;
-  await act(async () => { renderer = TestRenderer.create(<App />); });
-  await act(async () => jest.advanceTimersByTime(2200));
-  await act(async () => renderer.root.findByType('Onboarding').props.onOnboardingComplete());
-  expect(renderer.root.findAllByType('Onboarding')).toHaveLength(0);
-  expect(renderer.root.findAllByType('Activation')).toHaveLength(1);
-  await act(async () => renderer.unmount());
-});
-
 test('a server 401 removes the persisted session', async () => {
   await authService.login('9000000002', '123456');
   global.fetch.mockResolvedValue(response({message: 'Expired'}, 401));
